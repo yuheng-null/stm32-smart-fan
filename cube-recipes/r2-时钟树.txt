@@ -1,0 +1,45 @@
+# 第 2 遍配方：时钟树（8 MHz HSE -> 168 MHz）
+#
+# 用法（必须在 r1 跑完并落盘之后）:
+#   python tools/cubemx_apply.py apply <工程根> cube-recipes/r2-时钟树.txt
+#
+# =====================================================================
+# ⚠️ 为什么必须分成两遍 —— 本机实测的静默失效，别再踩
+# =====================================================================
+# RCC.HSE_VALUE 只在 CubeMX **config load 那一刻**被时钟模型读取。
+#
+# 同一次会话里「先 set ip parameters RCC HSE_VALUE 8000000，再 clock set ...」
+# 的结果是：
+#   · 命令全部回 OK
+#   · RCC.HSE_VALUE=8000000 确实写进了 .ioc（也在 IPParameters 白名单里）
+#   · roundtrip 报「原样保留」
+#   · 但模型仍按 25 MHz 建树 -> VCOInputFreq_Value=3125000 (=25/8)
+#     -> SYSCLKFreq_VALUE=525000000，严重超频
+# 没有一个环节报错。唯一的外部信号是 CubeMX 弹的时钟警告窗。
+#
+# 分两遍（第 1 遍落盘 HSE_VALUE，第 2 遍重新加载后再配时钟）即可得到
+# SYSCLKFreq_VALUE=168000000，且派生值与 ST 官方 F407 板模板逐值吻合。
+#
+# =====================================================================
+# 取值格式（实测，与 F1 不同，不要类推）
+# =====================================================================
+#   · PLLM / PLLN / PLLQ 收**纯数字**
+#   · 分频器（AHBCLKDivider / APB1CLKDivider / APB2CLKDivider / PLLP）
+#     收的**索引就是分频值本身**：2 -> /2, 4 -> /4, 1 -> /1。
+#     非法分频值（如 3）明确回 KO。
+#   · 多路选择器（PLLSource / SysClkSource）收 **0 起枚举**：
+#     PLLSource   : 0=HSI, 1=HSE      （可用范围 0..1）
+#     SysClkSource: 0=HSI, 1=HSE, 2=PLL （可用范围 0..2）
+#
+# 权威出处：CubeMX 自己 —— 脚本里单写一行 `clock set`，它会把当前 MCU 的
+# 全部可设项列出来；取值格式靠「设完 config saveas，再读生成的 .ioc」反推。
+
+clock set PLLSource 1
+clock set PLLM 8
+clock set PLLN 336
+clock set PLLP 2
+clock set PLLQ 7
+clock set SysClkSource 2
+clock set AHBCLKDivider 1
+clock set APB1CLKDivider 4
+clock set APB2CLKDivider 2

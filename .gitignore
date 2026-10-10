@@ -1,0 +1,25 @@
+# 构建产物
+build/
+*.elf
+*.map
+*.bin
+*.hex
+
+# CubeMX / 脚本留下的备份
+*.ioc.bak
+*.usercode.bak
+mx.scratch/
+
+# 编辑器与工具
+.vscode/ipch/
+*.su
+*.o
+*.d
+
+# ST 的 VSCode 扩展生成的本机状态（工具链版本缓存、IDE 偏好），
+# 换机器后会由扩展自己重建，不进仓库
+.settings/
+
+# Windows
+Thumbs.db
+desktop.ini

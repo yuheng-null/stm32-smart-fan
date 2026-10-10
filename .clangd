@@ -1,0 +1,9 @@
+# clangd 默认只在 <源码目录>/compile_commands.json 和
+# <源码目录>/build/compile_commands.json 两处找编译数据库，
+# 而 CMakePresets 把它放在 build/Debug/，两处都不匹配。
+# 不加这个文件，打开任何 .c 都会满屏红波浪线。
+#
+# 不需要 --query-driver：CMake 生成的 compile_commands.json 里已经写全了
+# GCC 的 -isystem 绝对路径，clangd 直接可用。
+CompileFlags:
+  CompilationDatabase: build/Debug

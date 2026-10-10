@@ -1,0 +1,32 @@
+# 第 1 遍配方：外部晶振、SWD 调试口、USART1
+#
+# 用法（工具随仓库发布，见 tools/cubemx_apply.py）:
+#   python tools/cubemx_apply.py apply <工程根> cube-recipes/r1-hse-usart-swd.txt
+#
+# ⚠️ 本文件必须单独跑一遍，之后再用 r2-时钟树.txt 跑第 2 遍。
+#    原因见 r2-时钟树.txt 顶部说明。
+
+# ---- 外部晶振 8 MHz ----
+# `set mode RCC "Crystal/Ceramic Resonator"` 是必需的：它才是把
+# PH0-OSC_IN.Mode 置成 HSE-External-Oscillator 的开关。
+# 只 `set pin ... RCC_OSC_IN` 只会写出 Signal，HSE 等于没使能。
+set mode RCC "Crystal/Ceramic Resonator"
+set pin PH0-OSC_IN RCC_OSC_IN
+set pin PH1-OSC_OUT RCC_OSC_OUT
+set ip parameters RCC HSE_VALUE 8000000
+
+# ---- SWD 调试口（用物理引脚，不用 SYS.Debug 那个键）----
+set pin PA13 SYS_JTMS-SWDIO
+set pin PA14 SYS_JTCK-SWCLK
+
+# ---- USART1：PA9=TX, PA10=RX，默认 115200-8-N-1 无流控 ----
+# 取值是 F4 的短名。带 UART_ 前缀的写法属于 LPUART，F4 的 USART 上非法：
+# 四层检查会全绿，只有 CubeMX 日志里的 "Parameter (WordLength) has invalid value"
+# 会说话，而后果是 MX_USART1_UART_Init() 少三个字段。
+# 权威出处: <CubeMX>/db/mcu/config/llConfig/USART-STM32F4xx_DefMapping.xml
+set mode USART1 "Asynchronous"
+set pin PA9 USART1_TX
+set pin PA10 USART1_RX
+set ip parameters USART1 WordLength WORDLENGTH_8B
+set ip parameters USART1 Parity PARITY_NONE
+set ip parameters USART1 StopBits STOPBITS_1

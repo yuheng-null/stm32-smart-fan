@@ -1,0 +1,38 @@
+{
+    // 断点调试配置（cortex-debug 扩展）。
+    //
+    // 路径用 ${env:LOCALAPPDATA}，VSCode 会在把配置交给调试适配器之前完成变量替换，
+    // 所以换台机器也能用——不用把本机的绝对路径写死进来。
+    //
+    // 工具链由 ST 的 VSCode 扩展按需下载到 <LOCALAPPDATA>/stm32cube/bundles/ 下，
+    // 版本号会随扩展更新变化；下面三个版本号若与你机器上的对不上，
+    // 用 ls 现查后改掉即可。
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "调试 (ST-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/smart_fan.elf",
+            "device": "STM32F407VE",
+            "interface": "swd",
+
+            // 用 cortex-debug 自带的 stlink 后端，不要用 ST 官方的 stlinkgdbtarget：
+            // 后者依赖「工作区根 == CMake 工程目录」这套工程识别，失败时不写任何日志，
+            // 只能靠猜。这个后端与工程上下文无关，且有独立的 "Cortex-Debug" 输出通道。
+            "servertype": "stlink",
+            "stlinkPath": "${env:LOCALAPPDATA}/stm32cube/bundles/stlink-gdbserver/7.14.0+st.2/bin/ST-LINK_gdbserver.exe",
+
+            // 必须给，且要指到含 STM32_Programmer_CLI.exe 的 bin 那一层
+            // （指到版本根目录会报 Missing application STM32CubeProgrammer 后退出）
+            "stm32cubeprogrammer": "${env:LOCALAPPDATA}/stm32cube/bundles/programmer/2.23.0/bin",
+
+            "armToolchainPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "gdbPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-gdb-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb.exe",
+
+            // 不停在启动文件，直接跑到 main()
+            "runToEntryPoint": "main"
+        }
+    ]
+}

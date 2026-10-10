@@ -1,0 +1,20 @@
+{
+    // 用 CMakePresets.json 里的 Debug/Release 预设来配置与构建
+    "cmake.useCMakePresets": "always",
+
+    // 代码智能交给 clangd（本机 ST 的 st-arm-clangd 扩展），
+    // 关掉 C/C++ 扩展的 IntelliSense 免得两套索引互相打架
+    "C_Cpp.intelliSenseEngine": "disabled",
+
+    // 构建产物不参与搜索与文件树，免得淹没源码
+    "files.exclude": {
+        "**/build": true
+    },
+    "search.exclude": {
+        "**/build": true
+    },
+
+    // 这份文件只在本工程作为 VSCode 工作区根时才会被读取。
+    // 打开的是父目录（embedded_learning）的话，它不会被加载。
+    "cmake.sourceDirectory": "${workspaceFolder}"
+}
