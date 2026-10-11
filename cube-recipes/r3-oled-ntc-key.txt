@@ -1,0 +1,94 @@
+# 第 3 遍配方：OLED（软件 I2C）+ NTC（ADC1）+ 两个按键
+#
+# 用法:
+#   python tools/cubemx_apply.py apply . "cube-recipes/r3-oled-ntc-key.txt"
+#
+# 前置：r1 与 r2 已跑完（8 MHz HSE -> 168 MHz）。本配方不改时钟树。
+
+# =====================================================================
+# 一、OLED：PB6 = SCL，PB7 = SDA
+#
+# 必须配成**开漏输出**——这是 I2C 的电气要求：任何一方只能把线拉低，
+# 不能主动拉高；否则两个器件同时输出相反电平时会直接短路。
+#
+# ⚠️ 输出模式下那个「模式参数」的名字是 GPIO_ModeDefaultOutputPP，
+#    不是 GPIO_Mode。依据是 CubeMX 自己的 GPIO 模式定义
+#    （db/mcu/IP/GPIO-STM32F417_gpio_v1_0_Modes.xml），
+#    以及既有工程 .ioc 里 GPIOParameters 的实际键名——
+#    输出脚的键是 GPIO_ModeDefaultOutputPP，输入脚才是 GPIO_Mode。
+#    写错名字不会报错到明面上，只会让这次 set 落空。
+#
+# GPIO_PuPd 写 PULLUP：F4 的输出模式下内部上拉是**真的生效**的
+# （F4 有独立 PUPDR，不同于 F1——F1 会静默忽略这个字段）。
+# 但 40 kΩ 太弱，总线实际靠 OLED 模块板载的 4.7 kΩ。
+# 这里配它只是兜底：万一模块没插，总线不会浮空。
+# =====================================================================
+
+set pin PB6 GPIO_Output
+set gpio parameters "PB6" "GPIO_ModeDefaultOutputPP" "GPIO_MODE_OUTPUT_OD"
+set gpio parameters "PB6" "GPIO_Speed" "GPIO_SPEED_FREQ_HIGH"
+set gpio parameters "PB6" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PB6" "GPIO_Label" "OLED_SCL"
+
+set pin PB7 GPIO_Output
+set gpio parameters "PB7" "GPIO_ModeDefaultOutputPP" "GPIO_MODE_OUTPUT_OD"
+set gpio parameters "PB7" "GPIO_Speed" "GPIO_SPEED_FREQ_HIGH"
+set gpio parameters "PB7" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PB7" "GPIO_Label" "OLED_SDA"
+
+# =====================================================================
+# 二、按键：PC0 = K1，PC1 = K2
+#
+# 另一端接 GND，所以配**上拉输入**，按下时读到低电平。
+#
+# 输入脚**不写模式参数**：信号名 GPIO_Input 本身已经表达了输入模式，
+# 参考工程的 .ioc 里输入脚也只有 GPIO_PuPd 和 GPIO_Label 两个键。
+# =====================================================================
+
+set pin PC0 GPIO_Input
+set gpio parameters "PC0" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PC0" "GPIO_Label" "KEY1"
+
+set pin PC1 GPIO_Input
+set gpio parameters "PC1" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PC1" "GPIO_Label" "KEY2"
+
+# =====================================================================
+# 三、NTC：PA0 = ADC1_IN0
+#
+# ⚠️ ClockPrescaler 必须显式写成 DIV4，**不能留默认值**：
+#    F407 的 ADC 挂在 PCLK2 = 84 MHz 上，而默认档是 /2 = 42 MHz，
+#    超过 F407 ADC 的 36 MHz 上限。
+#    依据：CubeMX 的 ADC IP 定义
+#      db/mcu/IP/ADC-aditf2_v1_1_Cube_Modes.xml
+#    （F407VET6 用的是 aditf2_v1_1_Cube，见 db/mcu/STM32F407V(E-G)Tx.xml），
+#    其中 FadcConstraint 的 Max = 36000000，
+#    且 DIV2 那一档自带
+#      Diagnostic="Prescaler divider not respecting Fadc Min Max Constraint"。
+#    /4 → 21 MHz，留有余量。
+#
+# 采样时间取 480 周期（F4 的最长档）：NTC 分压的中点源阻抗约 5 kΩ
+# （10k ∥ 10k，温度低时更大），采样时间越长对高阻源越宽容。
+# 依据：数据手册 ADC 特性里的 Equation 1
+#   RAIN < k / (fADC · CADC · ln(2^(N+2))) − RADC
+#
+# ExternalTrigConv 显式设成软件触发：HAL_ADC_Start() 发起的是软件触发，
+# 若这里留成外部触发，转换永远不会被触发，轮询会一直超时。
+#
+# 序列里第 0 个通道（rank 1）的采样时间键名带 `#`，形如
+#   SamplingTime-0#ChannelRegularConversion
+# 这是 CubeMX 对「重复参数」的命名：<参数名>-<序号>#<模式名>。
+# =====================================================================
+
+set pin PA0 ADC1_IN0
+set ip parameters ADC1 ClockPrescaler ADC_CLOCK_SYNC_PCLK_DIV4
+set ip parameters ADC1 Resolution ADC_RESOLUTION_12B
+set ip parameters ADC1 DataAlign ADC_DATAALIGN_RIGHT
+set ip parameters ADC1 ScanConvMode DISABLE
+set ip parameters ADC1 ContinuousConvMode DISABLE
+set ip parameters ADC1 DiscontinuousConvMode DISABLE
+set ip parameters ADC1 EOCSelection ADC_EOC_SINGLE_CONV
+set ip parameters ADC1 ExternalTrigConv ADC_SOFTWARE_START
+set ip parameters ADC1 ExternalTrigConvEdge ADC_EXTERNALTRIGCONVEDGE_NONE
+set ip parameters ADC1 NbrOfConversion 1
+set ip parameters ADC1 SamplingTime-0#ChannelRegularConversion ADC_SAMPLETIME_480CYCLES

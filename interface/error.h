@@ -18,6 +18,9 @@ typedef enum {
     ERR_NOT_INITIALIZED,  /**< 依赖的层还没初始化 */
     ERR_OVERFLOW,         /**< 数据或长度超出本层能表达的范围 */
     ERR_UNDERFLOW,        /**< 数据不足 */
+    ERR_COMMUNICATION,    /**< 通信失败（从机不应答 / 总线被占住） */
+    ERR_NOT_READY,        /**< 器件在位但还没就绪（如屏幕刚上电复位中） */
+    ERR_NOT_SUPPORTED,    /**< 当前实现不支持该操作 */
 } error_t;
 
 #endif /* INTERFACE_ERROR_H */

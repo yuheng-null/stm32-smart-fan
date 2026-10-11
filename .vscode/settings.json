@@ -16,5 +16,15 @@
 
     // 这份文件只在本工程作为 VSCode 工作区根时才会被读取。
     // 打开的是父目录（embedded_learning）的话，它不会被加载。
-    "cmake.sourceDirectory": "${workspaceFolder}"
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "stm32cube-ide-clangd.path": "cube",
+    "stm32cube-ide-clangd.arguments": [
+        "starm-clangd",
+        "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gcc*",
+        "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-g++*"
+    ],
+    "cmake.cmakePath": "cube-cmake",
+    "cmake.configureArgs": [
+        "-DCMAKE_COMMAND=cube-cmake"
+    ]
 }

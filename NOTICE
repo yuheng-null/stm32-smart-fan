@@ -1,0 +1,46 @@
+smart_fan — 第三方代码归属说明
+========================================================
+
+根目录 LICENSE 中的 MIT 协议，适用于本项目**自有**的代码：CMake 构建脚本、
+链接脚本以外的工程配置、以及 `app/`、`bsp/`、`module/`、`interface/`、
+`driver/` 下由本项目作者编写的代码。
+
+本仓库同时包含以下第三方代码，**不适用本项目 MIT 协议**，各自遵循上游协议。
+分发本仓库（或其衍生作品）时，请一并保留这些归属与协议声明。
+
+--------------------------------------------------------
+
+1. STM32F4xx HAL Driver
+   路径      Drivers/STM32F4xx_HAL_Driver/
+   版权方    STMicroelectronics
+   协议      BSD-3-Clause
+   协议全文  Drivers/STM32F4xx_HAL_Driver/LICENSE.txt
+
+2. CMSIS — Cortex Microcontroller Software Interface Standard
+   路径      Drivers/CMSIS/
+   版权方    ARM Limited
+   协议      Apache-2.0
+   协议全文  Drivers/CMSIS/LICENSE.txt
+
+3. ST 生成的工程骨架文件
+   路径      startup_stm32f407xx.s
+             STM32F407XX_FLASH.ld
+             Core/Src/{main.c, stm32f4xx_it.c, stm32f4xx_hal_msp.c,
+                       system_stm32f4xx.c, syscalls.c, sysmem.c}
+             Core/Inc/{main.h, stm32f4xx_it.h, stm32f4xx_hal_conf.h}
+   版权方    STMicroelectronics
+   来源      STM32CubeMX 6.15.0 + STM32Cube FW_F4 固件包 V1.28.3
+   协议      BSD-3-Clause
+   说明      这些文件由 STM32CubeMX 依据 .ioc 生成，文件头部的版权声明归
+             STMicroelectronics。其中 USER CODE BEGIN / END 注释区块内
+             由本项目作者编写的内容，适用本仓库的 MIT 协议。
+
+4. SSD1306 字模数据
+   路径      driver/device/ssd1306/ssd1306_fonts.c
+             driver/device/ssd1306/ssd1306_fonts.h
+   版权方    afiskon/stm32-ssd1306 项目作者
+   来源      https://github.com/afiskon/stm32-ssd1306
+   协议      MIT
+   说明      字模数据**原样引入，未作修改**。驱动 ssd1306.c/h 与寄存器
+             定义 ssd1306_reg.h 为本项目作者编写，但为了与字库兼容，
+             SSD1306_Font_t 的字段顺序与字体宏名沿用了上游约定。

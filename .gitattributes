@@ -1,0 +1,16 @@
+# 行尾约定
+#
+# 起因：CubeMX 重新生成工程时，会把它自己产出的链接脚本和工具链文件
+# **按 CRLF 重写**，而仓库里存的一直是 LF。结果每次「改配置 → 重新生成」
+# 都会给这两个文件留下几百行纯行尾差异的 diff，把真正的改动淹掉。
+# 实测：STM32F407XX_FLASH.ld 一次生成就是 269 增 / 269 删，内容一字未变。
+#
+# 这里把它们声明成文本并按 LF 检出，git 会在入库时做规范化，
+# 于是 CubeMX 再写 CRLF 也不会产生 diff。
+#
+# 不写成 `* text=auto`：那会把仓库里所有文件（含 ST/ARM 的驱动源码）
+# 一起重做规范化，产生一次全仓库的大改动。只针对已知会被 CubeMX 重写的路径。
+
+STM32F407XX_FLASH.ld    text eol=lf
+cmake/*.cmake           text eol=lf
+startup_*.s             text eol=lf

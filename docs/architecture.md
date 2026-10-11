@@ -2,9 +2,31 @@
 
 ## 分层与依赖方向
 
+与其画一张会看错的方框图，不如把**「谁可以调用谁」**直接列出来——
+依赖是单向的，反过来一律不允许：
+
 ```
-APP ──► MODULE ──► INTERFACE ──► BSP ──► PLATFORM
+调用方 ──────► 被调用方
+
+APP            ──►  MODULE、BSP、INTERFACE
+MODULE         ──►  INTERFACE
+BSP            ──►  DRIVER/device、DRIVER/bus、INTERFACE、PLATFORM
+DRIVER/device  ──►  INTERFACE
+DRIVER/bus     ──►  INTERFACE、PLATFORM
 ```
+
+几条关键性质：
+
+- **`INTERFACE` 是被依赖得最多、自己谁也不依赖的一层。** 它只有契约
+  （`error.h`、`uart_if.h`、`i2c_if.h`），没有实现、没有厂商头文件。
+- **`MODULE` 和 `DRIVER/device` 都只依赖 `INTERFACE`**，所以它们两个都不认识
+  STM32。业务逻辑和器件驱动换芯片时都不用改。
+- **`DRIVER/bus` 是唯一直接贴着 HAL 的驱动层**，它的职责就是**实现**
+  `INTERFACE` 里的总线契约（比如用 GPIO 位翻转实现 `i2c_if_t`）。
+- **`BSP` 是唯一同时认识「契约」和「本板引脚」的手写层**，它把驱动绑到具体引脚上：
+  「这块板子上，屏挂在哪条总线、按键接在哪两个脚」。
+- 画成「上中下」反而容易误解——`APP` 可以直接调 `BSP`（`app_main.c` 就是这么
+  取 UART 契约的），这不是越层，因为 `BSP` 就在 `APP` 的下方。
 
 依赖**只能向下**，不允许反向、不允许成环。
 
@@ -13,11 +35,21 @@ APP ──► MODULE ──► INTERFACE ──► BSP ──► PLATFORM
 | APP | [`app/`](../app) | 启动编排、状态机、任务创建 | HAL 调用、寄存器访问、外设驱动 |
 | MODULE | [`module/`](../module) | 业务逻辑（温控算法、风扇控制…） | HAL 调用、寄存器、CMSIS、RTOS 内部 API |
 | INTERFACE | [`interface/`](../interface) | **只有契约**（函数指针表、错误码） | 任何实现、任何厂商头文件 |
-| BSP | [`bsp/`](../bsp) | 把契约绑到具体引脚/外设上 | 业务判断 |
+| DRIVER/device | [`driver/device/`](../driver/device) | 具体器件的驱动（SSD1306…）：寄存器含义、显存、字符绘制 | HAL/CMSIS、任何 STM32 符号、引脚号 |
+| DRIVER/bus | [`driver/bus/`](../driver/bus) | 总线实现（软件 I2C…） | 业务判断、具体器件的协议 |
+| BSP | [`bsp/`](../bsp) | 把契约与驱动绑到具体引脚/外设上 | 业务判断 |
 | PLATFORM | [`Core/`](../Core) + [`Drivers/`](../Drivers) | CubeMX 生成的 HAL 适配、CMSIS、启动文件、链接脚本 | 业务逻辑 |
 
 「不许放什么」不是风格偏好：`app/` 里一旦出现 `HAL_GPIO_WritePin()`，
 换芯片时就要改业务逻辑，而业务逻辑本该是唯一不用改的部分。
+同理，`driver/device/ssd1306.c` 里若出现 `HAL_I2C_*`，它就绑死在了 STM32 上——
+现在它只认 `interface/i2c_if.h`，换到 GD32/ESP32 只需换一份总线实现。
+
+### 契约与实现分开带来的一个直接好处
+
+`ssd1306.c` 的全部输入是 `i2c_if_t`（三个函数指针）。在 PC 上给一份
+「把收到的字节打印出来」的假实现，就能不接硬件测显存组织、字符绘制、
+边界处理对不对——这类 bug 在硬件上调试一次的成本远高于写一个假实现。
 
 ## ⚠️ 一处与通用规范的偏离：`platform/` 由 `Core/` + `Drivers/` 承担
 
@@ -33,8 +65,9 @@ CLI 和 GUI 都没有「生成到 `platform/stm32f407/` 下」这个选项。要
 所以本工程的取舍是：
 
 - **厂商代码留在 `Core/` + `Drivers/`**，由 CubeMX 全权掌管，零人工搬运；
-- **分层规则严格应用到手写代码上**——`app/`、`module/`、`interface/`、`bsp/` 这四个
-  目录里，除 `bsp/` 外一律不许出现 HAL；`bsp/` 里也不许有业务判断。
+- **分层规则严格应用到手写代码上**——`app/`、`module/`、`interface/`、
+  `driver/device/` 一律不许出现 HAL；允许贴 HAL 的只有两个地方：
+  `bsp/` 和 `driver/bus/`，而且这两处也不许有业务判断。
 
 代价是目录名不叫 `platform/`；实质要求（厂商代码与业务逻辑不混放）是满足的。
 
@@ -100,6 +133,21 @@ python tools/cubemx_apply.py apply . cube-recipes/r2-时钟树.txt
 
 第 4 条不能省，也不能用前三条替代。本工程的时钟树就是靠心跳间隔实测出来的：
 固件按 1000 tick 排心跳，若实际晶振与 `HSE_VALUE` 不符，真实间隔就会偏离 1 秒。
+
+## 平台事实：STM32F4 与 STM32F1 的差异（都查过出处，不是类推）
+
+这几条在移植 F1 的代码风格过来时最容易想当然，单独记下来：
+
+| 事实 | STM32F1 | **STM32F4（本工程）** | 出处 |
+|---|---|---|---|
+| ADC 硬件自校准 | 有（`ADC_CR2.CAL`），HAL 为 `HAL_ADCEx_Calibration_Start()`；漏掉会有几十 LSB 固定偏差 | **没有**。`stm32f407xx.h` 里 `ADC_CR2` 只有 ADON/CONT/DMA/DDS/EOCS/ALIGN/…，**无 CAL 位**；`Drivers/STM32F4xx_HAL_Driver/` 全库搜不到 `HAL_ADCEx_Calibration_Start` | 本机 CMSIS 头 + HAL 源码；ST 社区亦确认「F4 系列 ADC 没有内建校准功能」 |
+| 开漏输出时能否读回引脚电平 | 能（输出模式下输入驱动器仍使能） | **能**。RM0090 §8.3.10 Output configuration：输出模式下施密特触发器仍使能，IDR 每个 AHB1 周期采样引脚，「a read access to the input data register gets the I/O state」 | RM0090 §8.3.10 |
+| 输出模式下的内部上拉 | **无效**（F1 无 PUPDR，上下拉只存在于输入模式，HAL 静默忽略 `Pull` 字段） | **有效**（F4 有独立的 PUPDR）。但 ~40 kΩ 太弱，总线仍靠从机器件板载的 4.7 kΩ | RM0090 §8.3.2 |
+| `HAL_ADC_PollForConversion` | 扫描模式 / 序列长度 >1 时**不查标志**，只空转最坏时间 | **无条件死等 EOC 标志**，单通道轮询可靠 | 本机 `stm32f4xx_hal_adc.c` |
+
+> 反过来说：移植 F1 代码到 F4 时，「照抄那条 ADC 校准」会直接编译不过
+> （符号不存在）——这是好事，编译期就挡住了；而「照抄 F1 关于内部上拉
+> 不生效的注释」则不会报错，只会写下一句错的硬件描述。上表就是为了防后者。
 
 ## 当前进度
 

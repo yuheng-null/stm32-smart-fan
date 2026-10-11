@@ -45,8 +45,25 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 # 手写代码一律放在这些与 CubeMX 无关的目录里；Core/、Drivers/ 下的内容
 # 由 CubeMX 掌管，除 USER CODE 块外不要动。
+#
+# 分层见 docs/architecture.md：app -> module -> interface <- driver <- bsp
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/app_main.c
+
+    module/temperature/temperature.c
+
+    # 总线驱动（贴 HAL 的那一层）
+    driver/bus/i2c/i2c_soft.c
+
+    # 设备驱动（可移植，不含任何 HAL 符号）
+    driver/device/ssd1306/ssd1306.c
+    driver/device/ssd1306/ssd1306_fonts.c
+
+    # 板级绑定
+    bsp/bsp_adc.c
+    bsp/bsp_i2c.c
+    bsp/bsp_key.c
+    bsp/bsp_oled.c
     bsp/bsp_system.c
     bsp/bsp_uart.c
 )

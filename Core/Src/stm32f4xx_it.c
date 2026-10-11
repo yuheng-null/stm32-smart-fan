@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bsp/bsp_key.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -187,6 +188,11 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+  /* 按键消抖采样：必须挂在**恒定**的节拍上，不能放主循环。
+     主循环刷一次 OLED（软件 I2C 搬 1 KB）要几十毫秒，若在主循环里采样，
+     一次短按可能整段落在刷屏期间而漏掉。SysTick 是 1 ms，
+     采样间隔与主循环在忙什么无关。详见 bsp/bsp_key.h 的说明。 */
+  bsp_key_scan_isr();
 
   /* USER CODE END SysTick_IRQn 1 */
 }

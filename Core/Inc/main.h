@@ -55,13 +55,22 @@ void Error_Handler(void);
 /* USER CODE BEGIN EFP */
 
 /* CubeMX 把外设句柄定义在 main.c 里，却没有在任何头文件里声明它们。
-   bsp/bsp_uart.c 要用 huart1，所以在这里补上 extern。
+   bsp/ 要用到这些句柄，所以在这里统一补上 extern。
    写在 USER CODE 块内：CubeMX 重新生成时会原样保留。 */
 extern UART_HandleTypeDef huart1;
+extern ADC_HandleTypeDef  hadc1;
 
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define KEY1_Pin GPIO_PIN_0
+#define KEY1_GPIO_Port GPIOC
+#define KEY2_Pin GPIO_PIN_1
+#define KEY2_GPIO_Port GPIOC
+#define OLED_SCL_Pin GPIO_PIN_6
+#define OLED_SCL_GPIO_Port GPIOB
+#define OLED_SDA_Pin GPIO_PIN_7
+#define OLED_SDA_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

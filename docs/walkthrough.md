@@ -417,11 +417,101 @@ grep -A2 "USART1_IRQn" Core/Src/stm32f4xx_hal_msp.c               # 应有 SetPr
 
 ---
 
+## 阶段 12：加 OLED / NTC / 按键三路驱动
+
+这一阶段第一次用到 CubeMX 脚本里**针对 GPIO 与 ADC** 的命令，新踩的坑记在这里。
+
+### 12.1 引脚的电气属性与标签要用 `set gpio parameters`
+
+`set pin` 只能把引脚配成 `GPIO_Output` / `GPIO_Input` / `GPIO_Analog`，
+**管不到开漏、上下拉、标签**，这些要用另一个命令：
+
+```text
+set pin PB6 GPIO_Output
+set gpio parameters "PB6" "GPIO_ModeDefaultOutputPP" "GPIO_MODE_OUTPUT_OD"
+set gpio parameters "PB6" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PB6" "GPIO_Label" "OLED_SCL"
+```
+
+⚠️ 输出脚的「模式参数」名字是 **`GPIO_ModeDefaultOutputPP`**，输入脚才叫
+`GPIO_Mode`；而且**输入脚根本不需要**写模式参数（信号名 `GPIO_Input`
+已经表达了）。依据是 CubeMX 自己的 IP 定义
+`db/mcu/IP/GPIO-STM32F417_gpio_v1_0_Modes.xml`，以及既有工程 `.ioc` 里
+`GPIOParameters` 的**实际键名**。写错名字不会明着报错，只会让这次 `set` 落空。
+
+标签写 `OLED_SCL`，生成的 `main.h` 里就是 `OLED_SCL_Pin` / `OLED_SCL_GPIO_Port`。
+
+### 12.2 ADC 的时钟分频必须显式确认，默认档会超限
+
+F4 的 ADC 挂在 PCLK2 = 84 MHz 上，而 `ClockPrescaler` 的默认档是 `/2` = **42 MHz**，
+超过 F407 ADC 的 **36 MHz** 上限。
+
+依据：`db/mcu/IP/ADC-aditf2_v1_1_Cube_Modes.xml`（F407VET6 用的是
+`aditf2_v1_1_Cube`，见 `db/mcu/STM32F407V(E-G)Tx.xml`），其中 `FadcConstraint`
+的 `Max="36000000"`，且 `/2` 那一档自带
+`Diagnostic="Prescaler divider not respecting Fadc Min Max Constraint"`。
+
+写 `ADC_CLOCK_SYNC_PCLK_DIV4`（21 MHz）即可。
+
+### 12.3 「参数没写进 `.ioc`」≠「命令没生效」
+
+这次 `ClockPrescaler` 与 `ScanConvMode` 都**没**出现在 `.ioc` 里，但生成的
+`MX_ADC1_Init()` 里两者都是我们要的值（`DIV4` / `DISABLE`）。
+
+原因：CubeMX 只序列化**与默认值不同**的参数，而这两个的「默认值」是它按本芯片
+约束解析出来的，不是 IP 定义 XML 上那个字面默认值。
+
+**判据永远是生成的代码，不是 `.ioc` 的键。** `.ioc` 缺一个键有两种完全不同的
+原因——命令落空、或值恰好等于默认——光看 `.ioc` 分不出来。
+
+### 12.4 `apply` 不生成代码
+
+`tools/cubemx_apply.py apply` 只把配方下达给 `.ioc`。要出代码得**再跑一次生成**
+（GUI 点 GENERATE CODE，或 `project generate` 脚本，`project path` 给**父目录**）。
+忘了这一步的症状：`main.h` 里没有新引脚的宏、`main.c` 里没有 `MX_ADC1_Init()`。
+
+生成前先快照 `Core/` 下所有 USER CODE 块，生成后逐块 diff 核对。
+
+### 12.5 STM32F4 没有 ADC 校准
+
+F1/F3 的 ADC 有硬件自校准（`HAL_ADCEx_Calibration_Start`），漏掉会有几十 LSB
+的固定偏差。**F4 没有**：`ADC_CR2` 里没有 ADCAL 位，F4 的 HAL 库里也不存在这个
+函数（已在本机 `Drivers/STM32F4xx_HAL_Driver/` 全库检索确认）。
+从 F1 项目移植代码时照抄那一行会直接编译不过——这是好事，编译期就挡住了。
+
+### 12.6 验收
+
+```bash
+# 1) 宏与初始化函数是否真的生成了
+grep -n "OLED_SCL_Pin\|KEY1_Pin" Core/Inc/main.h
+sed -n '/static void MX_ADC1_Init/,/^}/p' Core/Src/main.c
+#   期望: ClockPrescaler=DIV4 / ScanConvMode=DISABLE / Channel=ADC_CHANNEL_0
+#         SamplingTime=ADC_SAMPLETIME_480CYCLES / Rank=1
+
+# 2) GPIO 的电气属性对不对（开漏 + 上拉、输入 + 上拉）
+sed -n '/static void MX_GPIO_Init/,/^}/p' Core/Src/main.c
+#   期望: OLED 那两个脚 GPIO_MODE_OUTPUT_OD + GPIO_PULLUP
+#         KEY 那两个脚 GPIO_MODE_INPUT + GPIO_PULLUP
+
+# 3) PA0 是不是配成了模拟输入
+sed -n '/void HAL_ADC_MspInit/,/^}/p' Core/Src/stm32f4xx_hal_msp.c
+#   期望: GPIO_MODE_ANALOG + GPIO_NOPULL
+
+# 4) HAL 模块开关与源文件清单
+grep "HAL_ADC_MODULE_ENABLED" Core/Inc/stm32f4xx_hal_conf.h
+grep "hal_adc" cmake/stm32cubemx/CMakeLists.txt
+```
+
+---
+
 ## 收尾自检清单
 
 - [ ] `roundtrip` 报「原样保留」，且**没有白名单缺口**
 - [ ] **没有任何 `Parameter (X) has invalid value` / `not ready for code generation`**
       —— 这是唯一能证明「取值合法」的信号
+- [ ] `apply` 之后**另外跑过一遍代码生成**（`apply` 自己不生成代码）
+- [ ] 生成后把 `Core/` 下的 USER CODE 块**逐块 diff** 过，没有丢失或被改写
+- [ ] `.ioc` 里缺的键，去**生成的代码**里确认过取值（缺键≠没生效，见阶段 12.3）
 - [ ] `SYSCLKFreq_VALUE` 等于目标主频
 - [ ] 去生成的 `.c` 里**逐项找到代码**，外设初始化函数**字段一个不少**
 - [ ] `cmake --build` 通过，**零警告**
