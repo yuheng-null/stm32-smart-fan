@@ -30,6 +30,34 @@ DRIVER/bus     ──►  INTERFACE、PLATFORM
 
 依赖**只能向下**，不允许反向、不允许成环。
 
+### `module/` 内部：允许一条单向的「组合」依赖
+
+上面那张表只说了 `MODULE → INTERFACE`，没说 module 之间能不能互相依赖。
+本工程的选择是：**允许，但只允许一条，且必须是单向的**。
+
+```
+module/ 内部（叶子只依赖 interface/ 与 common/）
+    fan_control   fan_curve   pi_control   fan_fsm   console   telemetry   display_view
+         ▲             ▲            ▲
+         │             │            │
+         └─────── thermal_control ──┘        ← 唯一的「组合」模块
+```
+
+- **叶子**：`fan_control`、`fan_curve`、`pi_control`、`fan_fsm`、`console`、
+  `telemetry`、`display_view` —— 只依赖 `interface/` 与 `module/common/`，
+  互不认识。
+- **组合**：`thermal_control` 可以依赖 `fan_curve`、`pi_control`、`fan_control`
+  —— 它本来就是「把算法拼起来」的那一层。
+- **禁止**反向与成环。`fan_curve` 不能去 include `thermal_control`。
+
+这样做的收益很直接：除了 `thermal_control` 这一处，
+**每个模块都能单独编译、单独测试**，测试时不必先把整条链搭起来。
+`fan_fsm` 尤其如此——它连 `thermal_control` 都不认识，app 把算好的占空比
+当成一个整数喂给它，于是「喂一串按键事件，看模式怎么变」的测试朴素得像查表。
+
+`module/common/control_types.h` 是**只有类型、没有代码**的头文件，谁都可以
+include 它，因此不会成为环的载体。
+
 | 层 | 目录 | 放什么 | 不许放什么 |
 |---|---|---|---|
 | APP | [`app/`](../app) | 启动编排、状态机、任务创建 | HAL 调用、寄存器访问、外设驱动 |
@@ -151,13 +179,19 @@ python tools/cubemx_apply.py apply . cube-recipes/r2-时钟树.txt
 
 ## 当前进度
 
-已完成：时钟树（8 MHz HSE → 168 MHz）、SWD 调试口、USART1（PA9/PA10）、
-分层骨架、串口链路验证；三路外设（OLED / NTC / 按键）；
-风扇 PWM 调速 + FG 测速、继电器、有源蜂鸣器。
+**平台**：时钟树（8 MHz HSE → 168 MHz）、SWD、USART1（PA9/PA10，中断接收 + 环形缓冲）、
+分层骨架；外设：OLED（软 I2C）、NTC 测温（ADC1）、按键、风扇 PWM + FG 测速、
+继电器、有源蜂鸣器 —— 全部实测通过。
 
-`app/app_main.c` 目前是**全部外设的测试台**：开机横幅 + 周期状态行 + 串口单字符
-命令（`?` 命令表、`+`/`-` 占空比、`r` 继电器、`b` 蜂鸣器、`t` 状态、`8`/`1`/`p` 引脚诊断）。
-下一步把温控风扇的状态机替换掉 `app_main_run()` 里的循环，业务逻辑放 `module/`。
+**业务层**：温控级联（分段曲线 + 迟滞 → 内环 PI → 占空比）、运行模式状态机、
+传感器降级与失效安全、串口命令协议与遥测帧、OLED 视图。
+`app/app_main.c` 是一个**时间触发**的协作式调度器（每任务各自周期），
+业务逻辑全部在 `module/` 下且为**纯计算**，用宿主机单元测试覆盖
+（`tests/`，9 个测试目标，见 [README](../README.md) 的「测试」一节）。
+
+**尚未完成**：NTC 两点校准、风扇机电时间常数 τ 的实测（PI 增益因此还是
+IMC 整定的假定值）、rpm 绝对倍率与铭牌的对标。三者的测量方法都写在
+[`control.md`](control.md) 的「待标定」一节。
 
 ### 一个分层的实例：为什么「占空比 → CCR」不在 module 里
 

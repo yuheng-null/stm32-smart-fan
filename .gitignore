@@ -1,4 +1,6 @@
 # 构建产物
+# 注意 `build/` 没有前导斜杠，匹配**任意层级**下的 build 目录，
+# 因此宿主机单元测试的 tests/build/（独立 CMake 工程）也一并被忽略。
 build/
 *.elf
 *.map

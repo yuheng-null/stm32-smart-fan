@@ -78,3 +78,35 @@ uint8_t fan_control_duty_step(uint8_t duty, fan_duty_dir_t dir)
                ? FAN_CONTROL_DUTY_MIN_PERCENT
                : (uint8_t)(duty - FAN_CONTROL_DUTY_STEP_PERCENT);
 }
+
+error_t fan_control_duty_from_rpm(uint32_t rpm, uint8_t *duty_percent)
+{
+    if (duty_percent == NULL) {
+        return ERR_INVALID_PARAM;
+    }
+
+    /*
+     * 反解 rpm = K·duty + b 得 duty = (rpm − b) / K。
+     * rpm ≤ b 时解为负，物理含义是「目标转速低到模型的有效范围之外」——
+     * 那正是「应当停机」的情形，输出 0 并如实报码，让调用方能把它与
+     * 「算出来正好是 0%」区分开。
+     */
+    if (rpm <= (uint32_t)FAN_CONTROL_RPM_INTERCEPT) {
+        *duty_percent = FAN_CONTROL_DUTY_MIN_PERCENT;
+        return ERR_UNDERFLOW;
+    }
+
+    const uint32_t numerator   = rpm - (uint32_t)FAN_CONTROL_RPM_INTERCEPT;
+    const uint32_t denominator = (uint32_t)FAN_CONTROL_RPM_PER_PERCENT;
+
+    /* 四舍五入到最近的一整格：先加半个步长再整除，避免恒定偏小一格。 */
+    uint32_t duty = (numerator + (denominator / 2U)) / denominator;
+
+    if (duty > (uint32_t)FAN_CONTROL_DUTY_MAX_PERCENT) {
+        duty = (uint32_t)FAN_CONTROL_DUTY_MAX_PERCENT;
+    }
+
+    *duty_percent = (uint8_t)duty;
+
+    return ERR_OK;
+}

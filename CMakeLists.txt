@@ -49,9 +49,19 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # 分层见 docs/architecture.md：app -> module -> interface <- driver <- bsp
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/app_main.c
+    app/app_control.c
+    app/app_console.c
+    app/app_display.c
 
     module/temperature/temperature.c
     module/fan_control/fan_control.c
+    module/fan_curve/fan_curve.c
+    module/pi_control/pi_control.c
+    module/thermal_control/thermal_control.c
+    module/fan_fsm/fan_fsm.c
+    module/console/console.c
+    module/telemetry/telemetry.c
+    module/display_view/display_view.c
 
     # 总线驱动（贴 HAL 的那一层）
     driver/bus/i2c/i2c_soft.c

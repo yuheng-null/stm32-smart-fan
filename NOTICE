@@ -35,7 +35,16 @@ smart_fan — 第三方代码归属说明
              STMicroelectronics。其中 USER CODE BEGIN / END 注释区块内
              由本项目作者编写的内容，适用本仓库的 MIT 协议。
 
-4. SSD1306 字模数据
+4. Unity — 嵌入式 C 单元测试框架
+   路径      tests/unity/
+   版权方    Mike Karlesky, Mark VanderVoord, Greg Williams
+   来源      https://github.com/ThrowTheSwitch/Unity （tag v2.6.0）
+   协议      MIT
+   协议全文  tests/unity/LICENSE.txt
+   说明      源码原样引入，未作修改，供 tests/ 下的宿主机单元测试使用。
+             它只参与宿主机测试构建，不进入固件。
+
+5. SSD1306 字模数据
    路径      driver/device/ssd1306/ssd1306_fonts.c
              driver/device/ssd1306/ssd1306_fonts.h
    版权方    afiskon/stm32-ssd1306 项目作者

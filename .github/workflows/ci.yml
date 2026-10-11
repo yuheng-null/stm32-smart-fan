@@ -1,0 +1,60 @@
+name: CI
+
+# 持续集成：一条流水线里跑两类互相独立的质量门，分 job 是为了让失败原因一眼可辨。
+#
+#   1. host-tests     宿主机单元测试 —— 把 module/ 下的纯计算逻辑编译成本机可执行
+#                     文件直接跑。这类 bug（换算边界、状态机迁移、协议解析）在硬件
+#                     上要么难复现、要么代价高，放在这里跑几毫秒就能拦住。
+#   2. firmware-build 固件交叉编译 —— 确认改动没把目标构建弄坏（头文件、链接、警告）。
+#
+# 两类失败的性质完全不同：前者是逻辑错，后者是构建/接口错，所以不做成一个 job。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: 宿主机单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        # runner 自带 cmake，ninja 显式装一次，避免依赖镜像默认值。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: 配置
+        run: cmake -S tests -B tests/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: 构建
+        run: cmake --build tests/build
+
+      - name: 运行测试
+        run: ctest --test-dir tests/build --output-on-failure
+
+  firmware-build:
+    name: 固件交叉编译
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 ARM 交叉工具链
+        # libnewlib-arm-none-eabi 不能省：链接参数里带 --specs=nano.specs，
+        # 少了它在链接期会报找不到 nano.specs。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: 配置
+        run: cmake --preset Debug
+
+      - name: 构建
+        run: cmake --build build/Debug

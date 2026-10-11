@@ -59,6 +59,22 @@
  */
 #define FAN_CONTROL_DUTY_SPEC_MIN_PERCENT   (20U)
 
+/**
+ * ── 占空比 ⇄ 转速的经验模型（本风扇实测）─────────────────────────────
+ *   依据 README 记录的实测点：占空比 20% / 50% / 100% → 观测转速
+ *   3347 / 8527 / 16456 rpm。最小二乘拟合得
+ *
+ *       rpm ≈ 163 × duty% + 190          （拟合偏差约 2%）
+ *
+ *   ⚠️ 这组常数是**本风扇、本风道**的实测值，换风扇必须重测。
+ *   ⚠️ 转速是「观测单位」：若每转脉冲数标定值与 2 不符，本组常数要
+ *      **按同一倍率缩放**（否则前馈与闭环会各说各话）。
+ *   ⚠️ 该模型只在 ≥20% 有实测支撑——20% 以下 4 线规范未定义，实测也
+ *      偏离直线（0% 时风扇仍维持约 295 rpm）。
+ */
+#define FAN_CONTROL_RPM_PER_PERCENT (163)   /**< 静态增益 K（观测 rpm / %） */
+#define FAN_CONTROL_RPM_INTERCEPT   (190)   /**< 截距（观测 rpm） */
+
 /** 占空比步进方向。 */
 typedef enum {
     FAN_DUTY_UP = 0,    /**< 加一档 */
@@ -90,5 +106,23 @@ error_t fan_control_rpm_from_period_us(uint32_t period_us, uint32_t *rpm);
  * @return uint8_t 新的占空比（百分比）。
  */
 uint8_t fan_control_duty_step(uint8_t duty, fan_duty_dir_t dir);
+
+/**
+ * @brief 由目标转速反算一个**名义占空比**（经验模型反解）。
+ *
+ * 用途是**前馈与开环兜底**，不是替代内环 PI：
+ *   · 前馈：给 PI 一个接近的起点，减少它从零开始爬的时间；
+ *   · 开环兜底：FG 线断了、内环失去反馈时，仍能按温度曲线大致给出风量
+ *     （见 module/thermal_control）。
+ *
+ * @param rpm           目标转速（观测单位）。
+ * @param duty_percent  输出，名义占空比，夹在 [0, 100]。
+ *
+ * @return error_t ERR_OK 正常；
+ *                 ERR_INVALID_PARAM duty_percent 为空；
+ *                 ERR_UNDERFLOW rpm 低到不落在模型的有效范围内
+ *                               （≤ 截距；此时输出 0，表示「按停机处理」）。
+ */
+error_t fan_control_duty_from_rpm(uint32_t rpm, uint8_t *duty_percent);
 
 #endif /* MODULE_FAN_CONTROL_H */

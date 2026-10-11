@@ -2,11 +2,19 @@
 
 基于 STM32F407VET6 的温控风扇。
 
-当前进度：**工具链 → 板子 → 串口**链路已打通并实测验证（时钟 168 MHz、串口中断收发）；
-**OLED / NTC 测温 / 按键**三路驱动、以及**风扇 PWM 调速 + FG 测速 / 继电器 / 蜂鸣器**
-三路也都写完并实测通过（见下面的「验证外设」）。
-温控算法尚未开始——`app/app_main.c` 目前是全部外设的测试台，
-下一步把温控状态机替换掉 `app_main_run()` 里的循环。
+**控制结构是级联的**：温度经分段曲线（带迟滞）得到目标转速，内环 PI 再用 FG
+实测转速把占空比调到那个目标上。这么做的理由、以及每个参数的来历，
+都写在 [`docs/control.md`](docs/control.md)。
+
+当前进度：**平台与外设全部实测通过**（时钟 168 MHz、串口中断收发、OLED / NTC /
+按键 / 风扇 PWM + FG 测速 / 继电器 / 蜂鸣器）；**温控业务层已完成**——
+级联控制、运行模式状态机、传感器降级与失效安全、串口命令协议与遥测帧、
+OLED 视图，业务逻辑全部在 `module/` 下且为**纯计算**，
+用宿主机单元测试覆盖（见下面的「测试」）。
+
+> ⚠️ **三处尚未标定**，都已在代码与文档里显式标注、并在界面上以报警位提示：
+> NTC 的两点校准、风扇机电时间常数 τ（PI 增益因此还是假定值）、
+> rpm 的绝对倍率。测量方法见 [`docs/control.md`](docs/control.md) 的「待标定」。
 
 ## 硬件
 
@@ -20,7 +28,7 @@
 | 测温 | LM393 型 NTC 模块的 **AO → PA0（ADC1_IN0）**，模块 VCC 必须接 **3.3V** |
 | 按键 | 两个轻触按键，另一端接 GND：**K1 = PC0 / K2 = PC1**，上拉输入，按下为低 |
 | 风扇 | 12V 4 线 PWM 风扇：**PWM → PA8（TIM1_CH1，25 kHz，开漏）/ FG → PA1（TIM2_CH2 输入捕获）** |
-| 继电器 | 高电平触发模块：**IN → PB0**，VCC 走**独立 5V**（线圈 ~70–90 mA 不占板子 3.3V 轨） |
+| 继电器 | 高电平触发模块：**IN → PB0**，VCC 走**独立 5V**（线圈 ~70–90 mA 不占板子 3.3V 轨）。**接的是小灯，用作报警指示**——系统进 FAULT 时点亮 |
 | 蜂鸣器 | 有源蜂鸣器模块，低电平触发：**IO → PB1**，VCC 接 3.3V |
 
 CH340 与板子的接法（**必须交叉，且必须共地**）：
@@ -48,6 +56,35 @@ cmake --build build/Debug
 
 （版本号用 `ls ~/AppData/Local/stm32cube/bundles/<工具>` 现查，别硬记。）
 
+## 测试
+
+`module/` 下的业务逻辑是**纯计算**（不含 HAL、不含寄存器、不碰寄存器地址），
+所以能在**宿主机**上直接编译运行——不需要板子、不需要 ST-Link。
+`tests/` 是一个**独立的 CMake 工程**（与固件的交叉编译工程隔离），
+用 Unity 断言框架 + CTest 组织。
+
+```bash
+# 宿主机编译：用本机的 gcc，不走交叉工具链
+cmake -S tests -B tests/build -G Ninja
+cmake --build tests/build
+ctest --test-dir tests/build --output-on-failure
+```
+
+| 测试目标 | 覆盖的内容 |
+|---|---|
+| `test_temperature` | NTC 分压反算、Beta 方程、端点与单调方向 |
+| `test_fan_control` | FG 周期→转速（含毛刺/超时/边界）、档位步进、经验模型反解 |
+| `test_fan_curve` | 分段插值、**迟滞不抖 / 该换挡时确实换**、边界钳位、非法配置 |
+| `test_pi_control` | 抗积分饱和、限幅、限速率、无扰复位、**一阶对象闭环仿真收敛** |
+| `test_thermal_control` | 级联闭环跟踪、占空比下限（不落未定义区）、兜底与恢复、dt 用真实时间 |
+| `test_fan_fsm` | 各模式迁移、长按/短按、最小驻留、降级与 FAULT、外部报警透传 |
+| `test_console` | 行协议解析、CRLF、超长行不越界、非法参数 |
+| `test_telemetry` | CSV 帧**逐字节**匹配、负温度、缓冲不足报错 |
+| `test_display_view` | **每行不超 21 字符**且内容完整（挡住越界静默绘制） |
+
+CI（`.github/workflows/ci.yml`）有两个 job：宿主机单测、固件交叉编译。
+前者拦住逻辑错，后者拦住构建/接口错。
+
 ## 烧录
 
 ```bash
@@ -62,70 +99,99 @@ B="$HOME/AppData/Local/stm32cube/bundles/programmer/2.23.0/bin"
 
 ## 验证
 
-固件每 200 ms 输出一行状态，同时把同样内容画到 OLED 上；上电时先做一次 I2C 总线扫描。
+固件每 200 ms 输出一行遥测；上电时先做一次 I2C 总线扫描。
+OLED 上同时显示（大字号温度 + 模式 + 目标/实测转速 + 报警）。
 
 ```bash
 python tools/capture_serial.py                    # 复位板子并抓取
 python tools/capture_serial.py --seconds 40       # 抓久一点
 python tools/capture_serial.py --echo "PING"      # 发数据出去，验证 RX 回显
-
-# 发命令控制外设（--echo 时不复位，状态会累加）
-python tools/capture_serial.py --echo="?++t"      # 帮助 / 加两档占空比 / 打印状态
-python tools/capture_serial.py --echo="r"         # 继电器吸合
-python tools/capture_serial.py --echo="b"         # 蜂鸣器响
+python tools/capture_serial.py --echo="STATUS"    # 打印一行完整状态
 ```
 
-> ⚠️ 发以 `-` 开头的命令（减档）要用 `--echo=----------` 这种**等号**写法：
-> 写成 `--echo "----------"` 会被 argparse 当成选项，脚本直接报错退出。
+> ⚠️ 发以 `-` 开头的字符串要用 `--echo=...` 这种**等号**写法：
+> 写成 `--echo "..."` 会被 argparse 当成选项，脚本直接报错退出。
 
 预期输出：
 
 ```
-==== smart_fan boot ====
+==== smart_fan 智能温控风扇 ====
 SYSCLK = 168000000 Hz
-外设: OLED(SSD1306, 软 I2C PB6/PB7) + NTC(PA0/ADC1_IN0) + 按键(PC0/PC1)
-      + 风扇 PWM(PA8/TIM1_CH1, 25kHz, 开漏) + 风扇测速(PA1/TIM2_CH2)
-      + 继电器(PB0, 高电平触发) + 有源蜂鸣器(PB1, 低电平触发)
+架构: app -> module(纯计算,可在 PC 单测) -> interface；bsp 贴硬件
+温控: 温度 -> 分段曲线(+迟滞) -> 目标转速 -> 内环 PI -> PWM 占空比
 ...
-OLED: probing 0x3C/0x3D ...
 I2C scan: 1 device(s) 0x3C
 OLED: OK
-[  466 ms] T = 23.8 C  raw = 2103  R = 10.55 kohm  K1 = 0(-)  K2 = 0(-)  | fan duty = 0%  rpm = 0  fg = 0  rpm_status = 8  | relay = OFF  buzz = OFF  | drop = 0  err = 0  status = 0
+[   466 ms] AUTO   T 23.8C  adc 2103  duty  30%  rpm 4800->5000  alarms 0x08
 ```
-
-每个字段怎么读：
 
 | 字段 | 含义 |
 |---|---|
 | `SYSCLK` | 时钟树对不对。**这行本身就是独立验证**：主频算错时串口波特率跟着错，整屏都是乱码，你根本读不到这行 |
 | `I2C scan` / `OLED: OK` | 屏有没有应答、用了哪个地址 |
-| `T` | 换算出的温度（**未校准，只看趋势**） |
-| `raw` | ADC 原始计数（0~4095）。**这是没经过任何假设的数字**，校准以它为准 |
-| `R` | 由 `raw` 反算出的 NTC 阻值（kΩ），用来和万用表实测值对照 |
-| `K1` / `K2` | 累计按下次数；括号里 `*` 表示此刻正按着 |
-| `fan duty` | 风扇 PWM 占空比（%）。K1 加档、K2 减档，串口 `+` / `-` 等效 |
-| `rpm` | 由 FG 相邻两个上升沿的间隔算出的转速。**绝对倍率尚未用铭牌标定**（见下） |
-| `fg` | 累计捕获到的 FG 沿数。**判断 FG 线通不通就看它**：风扇在转却一直不动，说明线或上拉有问题 |
-| `rpm_status` | `0` 正常；`1` 超时（1 s 没新沿，按停转处理）；`4` 未初始化；`8` 还没凑够两个沿 |
-| `relay` / `buzz` | 继电器与蜂鸣器的命令状态（串口 `r` / `b` 切换） |
-| `drop` | 接收缓冲满而丢弃的字节数 |
-| `err` | 串口出错次数（帧错误 / 噪声 / 溢出） |
-| `status` | `temperature_from_adc_raw()` 的返回码，`0` 即正常 |
+| 模式码 | `INIT` / `OFF` / `MANUAL` / `AUTO` / `DEGR` / `FAULT` |
+| `T` | 换算出的温度。**未校准，只看趋势**；无效时显示 `---` |
+| `adc` | ADC 原始计数（0~4095）。**这是没经过任何假设的数字**，校准以它为准 |
+| `duty` | 当前占空比（%）。恒为 `0` 或 `≥20`——4 线风扇 <20% 行为未定义 |
+| `rpm` | `实测 -> 目标`。**绝对倍率尚未用铭牌标定**（见下） |
+| `alarms` | 报警位图（十六进制）：`01`=!TEMP `02`=!TACH `04`=!TRACK `08`=!CAL `10`=!OLED |
 
-### 三路外设各自的判据
+`alarms` 里 **`0x08`（!CAL）在 NTC 标定之前会一直亮着**——这是有意为之，
+提醒看的人「温度这一维还没校准」。
 
-| 外设 | 静态：证明「采到了」 | 动态：证明「真的在响应」 |
+### 串口命令
+
+单字符或行命令，`\r` / `\n` / `\r\n` 结束，大小写不敏感。发 `?` 看内置帮助。
+
+| 命令 | 作用 |
+|---|---|
+| `?` | 帮助 |
+| `STATUS` | 打印一行完整状态 + 串口链路诊断（`rx_drop` / `rx_err`） |
+| `MODE OFF\|AUTO\|MANUAL` | 切模式 |
+| `MANUAL <0..100>` | 手动占空比（1~19 会被抬到 20） |
+| `TEMP <摄氏度>` | 设目标温度，如 `TEMP 32.5` |
+| `PID <kp> <ki>` | 在线整定内环 |
+| `STREAM <0\|1>` | `0`=人类可读行，`1`=CSV 遥测帧 |
+| `RESET` | 清报警并回到 AUTO |
+
+每条命令都有 `@ACK,<verb>,OK` 或 `@ACK,<verb>,ERR,<code>` 回执——这是把
+「命令发出去了」和「命令生效了」分开的手段，也是自动化回归的抓手。
+
+**按键**：K1/K2 短按调参（AUTO 下调目标温度、MANUAL 下调档位）；
+K1 长按循环 `AUTO → MANUAL → OFF`；K2 长按静音蜂鸣器（FAULT 下是复位）。
+
+### 用遥测调参
+
+```bash
+# 切到 CSV 模式抓一段，然后抽帧、画图
+python tools/capture_serial.py --echo="STREAM 1" --seconds 30
+python tools/plot_telemetry.py %TEMP%/smart_fan_serial_capture.txt
+```
+
+`@TEL` 帧格式（全整数，字段顺序是对外契约）：
+
+```
+@TEL,<seq>,<t_ms>,<mode>,<duty>,<temp_mc>,<adc>,<rpm>,<target_rpm>,<alarms>
+```
+
+`seq` 用于**检测丢帧**；`adc` 是**不受未标定影响的原始量**，标定以它为准。
+`plot_telemetry.py` 会抽出 CSV 并画一张「温度 / 目标转速 vs 实测转速 / 占空比 /
+ADC」的四联图——**调 PI 主要看的就是第二张**。
+
+### 上板验收清单
+
+改完控制逻辑后，至少走一遍这五条：
+
+| # | 操作 | 预期 |
 |---|---|---|
-| OLED | `I2C scan` 有 `0x3C`（或 `0x3D`）且 `OLED: OK` | **必须肉眼确认屏上有字**——`OK` 只证明命令被 ACK，不证明画对了 |
-| NTC | `raw` 落在合理区间（室温下约 1900~2200） | 捏住模块上的热敏电阻十几秒：`raw` 应**下降**、`T` 上升，松手后回落 |
-| 按键 | 未按时计数不动 | 按一下计数 **+1**（多按一次不会 +2），按下期间显示 `(*)` |
-| 风扇调速 | 设 0% 时 `fg` 基本不涨（风扇维持最低转速） | K1 加档转速**单调上升**：实测 20%/50%/100% → 3347/8527/16456 rpm，约 167 rpm 每 1%（**线性度好 = PWM 真的在按比例调**） |
-| 风扇测速 | `fg` 在风扇转时持续累加、`rpm_status = 0` | 占空比变化时 `rpm` 跟着变，方向一致 |
-| 继电器 | `relay = OFF` 时小灯灭 | 发 `r` → 小灯亮；再发一次灭 |
-| 蜂鸣器 | `buzz = OFF` 时无声 | 发 `b` → 响；再发一次停 |
+| 1 | `MODE MANUAL` + `MANUAL 50` | 转速跟着命令走，与旧的手动测试一致 |
+| 2 | `MODE AUTO`，**捏住 NTC 十几秒** | 转速随温度**单调上升**；松手后回落 |
+| 3 | AUTO 下**拔掉 NTC** | 进 `DEGR`、报警位出现 `!TEMP`、风扇维持安全转速（不停） |
+| 4 | 同时拔掉 FG 线 | 进 `FAULT`：满速 + 报警灯亮 + 蜂鸣器响 |
+| 5 | K2 长按 | 从 FAULT 复位回 AUTO（传感器没修好会立刻回到 FAULT——这是对的） |
 
-「静态通」和「动态对」是两件事：命令被 ACK 不等于内容画对了，
-ADC 采到数不等于方向没接反。**两类都要过**。
+「命令被接受」「单测全绿」「编译通过」都证明不了硬件真的按你设计的路径走了。
+**第 4、5 条必须在真板子上过。**
 
 ### 排障：`I2C scan` 是第一入口
 
@@ -135,14 +201,10 @@ ADC 采到数不等于方向没接反。**两类都要过**。
 - **只有 `0x3C`（或 `0x3D`）** → 正常；
 - **出现别的地址** → 总线上挂了非预期器件。
 
-`drop` / `err` 是判断串口链路最直接的指标：**接线松、没共地、波特率不匹配时
-`err` 会持续上涨**，比看现象猜接线快得多。
+串口链路的诊断看 `STATUS` 里的 `rx_drop` / `rx_err`：**接线松、没共地、
+波特率不匹配时 `err` 会持续上涨**，比看现象猜接线快得多。
 
 （若串口助手占着 COM 口，脚本会报 `FAILED_TO_OPEN` —— 先关掉它。）
-
-> ⚠️ **温度目前不是准确值。** NTC 的 `R25` 和 `B` 是按模块型号**假定**的
-> （10 kΩ、B=3950），未实测。校准方法写在
-> [`module/temperature/temperature.h`](module/temperature/temperature.h) 顶部。
 
 ### 风扇接线：三条实测踩过的坑
 
@@ -163,14 +225,24 @@ ADC 采到数不等于方向没接反。**两类都要过**。
 - 风扇**立刻回到全速** → 它确实是 PWM 控制线（拔掉后输入悬空，内部上拉把它顶到 100%）；
 - 风扇**毫无变化** → 那是测速线。
 
-固件里也留了对应的诊断命令 `8` / `1` / `p`（见 `bsp/bsp_fan.h` 的
-`bsp_fan_force_pin_low()`）：绕过定时器把 PA8 / PA1 直接拉低，用来把
-「引脚没被拉低」和「线没接到这个脚上」两件事分开。**执行后需复位板子才能恢复。**
+> **诊断入口目前没有接到串口上。** `bsp/bsp_fan.h` 里的
+> `bsp_fan_force_pin_low()` 仍然在——它绕过定时器把 PA8 / PA1 直接拉低，
+> 用来把「引脚没被拉低」和「线没接到这个脚上」两件事分开
+> （**执行后需复位板子才能恢复**）。但改成温控应用之后，原先测试台里那三个
+> 单字符诊断命令（`8` / `1` / `p`）被一并删掉了。
+> 要恢复它们，在 `app/app_console.c` 里加一条命令接到这个函数即可（约十行）。
+> 之所以没有默认保留：它会让引脚停在一个非正常状态、必须复位才能继续，
+> 放在日常可用的控制台里是个陷阱。
 
 #### RPM 绝对倍率待标定
 
 `rpm` 的换算基于两个假设：FG **每转 2 个脉冲**（Intel 规范值）、且**每个边沿只被
 捕获一次**。实测 100% 时读到约 16400 rpm，线性度很好，但绝对值还没和铭牌对过。
+
+> **这一条不影响控温的正确性**：曲线的纵轴与内环用的是同一个「观测转速」，
+> 倍率误差在闭环内被消掉，只影响屏上数字的物理含义。
+> 标定后把曲线纵轴与经验模型常数**按同一倍率**一起缩放即可。
+> 详见 [`docs/control.md`](docs/control.md) 的「待标定」。
 若与风扇铭牌差一个固定倍数，两个可能：**每转脉冲数不是 2**（改
 `FAN_CONTROL_PULSES_PER_REV`），或 **FG 边沿有振铃被重复捕获**——后者目前只用
 STM32 内部约 40 kΩ 上拉、且未开输入滤波器，修法是开 TIM2 的输入捕获数字滤波器，
@@ -222,6 +294,7 @@ python tools/cubemx_apply.py regenerate .
 
 | 文件 | 内容 |
 |---|---|
+| [`docs/control.md`](docs/control.md) | **控制算法、状态机、整定与待标定项** —— 每个参数的来历 |
 | [`docs/hardware.md`](docs/hardware.md) | **引脚分配表、接线图、电气要求**（3.3V 的理由、上拉来源、采样时间依据） |
 | [`docs/architecture.md`](docs/architecture.md) | 分层规则、依赖方向、CubeMX 管辖边界、验证纪律、F4 与 F1 的平台差异 |
 | [`docs/walkthrough.md`](docs/walkthrough.md) | **从空文件夹到跑通的完整操作记录**，每步附验收标准 |
@@ -241,11 +314,24 @@ smart_fan/
 │   ├── bus/         总线实现（软件 I2C）——贴 HAL 的那一层
 │   └── device/      器件驱动（SSD1306）——纯可移植，不含任何 STM32 符号
 ├── bsp/             板级绑定：把契约与驱动绑到具体引脚/外设
-├── module/          业务逻辑（温度换算、风扇转速换算与档位策略）
-├── app/             启动编排、状态机
+├── module/          业务逻辑（纯计算，可在 PC 上单测）
+│   ├── common/        共享值类型（采样、模式、报警位）
+│   ├── temperature/   ADC 计数 → 毫摄氏度
+│   ├── fan_control/   FG 周期 → 转速、档位步进、转速↔占空比经验模型
+│   ├── fan_curve/     温度 → 目标转速（分段插值 + 迟滞）
+│   ├── pi_control/    通用 PI（抗饱和 / 限幅 / 限速率）
+│   ├── thermal_control/ 级联控制器（上面三者的组合）
+│   ├── fan_fsm/       运行模式状态机
+│   ├── console/       串口行命令解析
+│   ├── telemetry/     遥测帧格式化
+│   └── display_view/  OLED 视图模型（约束行宽）
+├── app/             启动编排、时间触发调度器、控制编排、串口、显示
+├── tests/           宿主机单元测试（独立 CMake 工程 + Unity）
 ├── cube-recipes/    下达给 CubeMX 的配置配方（改配置的唯一入口）
-├── docs/            架构说明 + 完整开发过程记录
-├── tools/           cubemx_apply.py（配置下达）、capture_serial.py（串口验证）
+├── docs/            架构说明 + 控制文档 + 完整开发过程记录
+├── tools/           cubemx_apply.py（配置下达）、capture_serial.py（串口抓取）、
+│                    plot_telemetry.py（遥测抽取与绘图）
+├── .github/         CI：宿主机单测 + 固件交叉编译
 └── .vscode/         clangd / CMake Tools / 断点调试配置
 ```
 
@@ -253,8 +339,9 @@ smart_fan/
 ST 的工具链假设「工作区根 == CMake 工程目录」，错开会让它
 从代码索引到调试以三种不同面目失败。
 
-分层与依赖方向（`APP → MODULE → INTERFACE`，`BSP → DRIVER → PLATFORM`），
-以及「为什么把厂商代码留在 `Core/`+`Drivers/` 而不是搬进 `platform/`」，
+分层与依赖方向（`APP → MODULE → INTERFACE`，`BSP → DRIVER → PLATFORM`，
+以及 `module/` 内部那条唯一的组合依赖），
+还有「为什么把厂商代码留在 `Core/`+`Drivers/` 而不是搬进 `platform/`」，
 都写在 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 许可
