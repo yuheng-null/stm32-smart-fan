@@ -12,8 +12,12 @@
 '?'，看起来像固件乱码，实际是抓取侧的问题。
 
 每条完整行的到达时刻都会打上墙钟时间戳。这是对时钟树的独立验证：
-心跳是按 HAL_GetTick() 排的，而 tick 由 HCLK 分频得到；若实际晶振与
-HSE_VALUE 不符，真实心跳间隔就会偏离 1 秒。
+遥测是按 HAL_GetTick() 排的（200 ms 一拍），而 tick 由 HCLK 分频得到；
+若实际晶振与 HSE_VALUE 不符，真实间隔就会按比例偏离 200 ms。
+
+`--echo` 发命令之后，判据是**有没有收到 `@ACK`**，而不是「字节被原样回显」——
+固件有意不回显（回显会和遥测流叠在一起变噪音），确认由 `@ACK,<verb>,OK` 承担。
+命令没到达 MCU 就不会有任何回执，所以这条判据同样能证明 RX 通路是通的。
 
 如果串口助手已经占着这个口，会报 PermissionError —— 先关掉它。
 """
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -39,6 +44,9 @@ DEFAULT_BAUD = 115200
 DEFAULT_SECONDS = 6.0
 # 收满一行就记时间戳；没换行的碎数据先攒着
 READ_CHUNK = 4096
+
+# 固件的人类可读遥测行长这样：[  1452 ms] AUTO   T 26.0C  adc 2000  duty   0% ...
+TELEMETRY_RE = re.compile(r"^\[\s*\d+ ms\]")
 
 
 def find_programmer_cli() -> Path | None:
@@ -140,27 +148,44 @@ def main() -> int:
     for at, text in stamped:
         print(f"[{at:6.3f}s] {text}")
 
-    # 心跳间隔是对时钟的独立验证，单独算一遍
-    beats = [at for at, text in stamped if text.startswith("[heartbeat")]
-    if len(beats) >= 2:
+    # 遥测行间隔是对时钟的独立验证，单独算一遍。
+    # 固件按 200 ms 排遥测（APP_TASK_SLOW_MS）；间隔由 HAL_GetTick() 决定，
+    # 而 tick 由 HCLK 分频而来——若实际晶振与 HSE_VALUE 不符，真实间隔会按比例偏移。
+    beats = [at for at, text in stamped if TELEMETRY_RE.match(text)]
+    if len(beats) >= 3:
         gaps = [b - a for a, b in zip(beats, beats[1:])]
-        avg = sum(gaps) / len(gaps)
-        print("\n---- 心跳间隔 ----")
-        print("  " + "  ".join(f"{g:.3f}s" for g in gaps))
-        print(f"  平均 {avg:.3f}s（固件按 1000 tick 排；明显偏离 1.000s 即说明实际主频与配置不符）")
+        gaps = [g for g in gaps if g < 1.0]          # 丢掉被人为打断的那些
+        if gaps:
+            avg = sum(gaps) / len(gaps)
+            print("\n---- 遥测间隔 ----")
+            print("  " + "  ".join(f"{g:.3f}s" for g in gaps[:12]))
+            print(f"  平均 {avg:.3f}s（固件按 200 ms 排；明显偏离说明实际主频与配置不符）")
+            print(f"  → 实测主频约 {168_000_000 * (0.200 / avg) / 1e6:.1f} MHz"
+                  if avg > 0 else "")
 
-    # 回显判定：发出去的字符串必须原样出现在 RX 流里。
-    # 固件也会同时在发心跳行，所以只看「payload 是否完整出现」，
-    # 不去要求 RX 完全等于 payload。
+    # 命令响应判定：发出去的命令有没有得到回执。
+    #
+    # 固件**有意不回显**收到的字节——回显会和 200 ms 一帧的遥测叠在一起变成噪音，
+    # 确认改由 `@ACK,<verb>,OK` / `@ACK,<verb>,ERR,<code>` 承担。
+    # 所以这里判据是「有没有收到 @ACK」，它同样能证明 RX（PA10）通路是通的：
+    # 命令没到达 MCU，就不会有任何回执。
     if args.echo is not None:
         payload = args.echo.encode("ascii")
-        print("\n---- 回显判定 ----")
+        print("\n---- 命令响应 ----")
         print(f"  发出 {len(payload)} 字节: {payload!r}")
-        print(f"  RX 共收 {len(raw)} 字节: {bytes(raw)!r}")
-        if payload in bytes(raw):
-            print("  OK: 发出去的字符串原样回来了 —— PA10(RX) 通路正常")
+        print(f"  RX 共收 {len(raw)} 字节")
+
+        acks = [line for line in raw.decode("utf-8", "replace").splitlines()
+                if line.startswith("@ACK,")]
+
+        for line in acks:
+            print(f"  {line}")
+
+        if acks:
+            print("  OK: 收到回执 —— PA10(RX) 通路正常，命令已到达 MCU")
         else:
-            print("  FAIL: 没在 RX 里找到发出的字符串 —— 检查 PA10 接线与共地")
+            print("  FAIL: 没有任何 @ACK 回执 —— 检查 PA10 接线与共地，")
+            print("        以及命令行是否以 \\r 或 \\n 结束（行协议必须有结束符）")
             return 1
 
     return 0

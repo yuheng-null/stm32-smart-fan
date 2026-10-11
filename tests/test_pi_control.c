@@ -316,28 +316,81 @@ static void test_set_gains_keeps_state(void)
 
 /* ------------------------------------------------------- 闭环仿真 */
 
-/**
- * 对一阶对象做闭环仿真——本文件里最关键的一条。
+/*
+ * ── 仿真对象：一阶惯性 + 死区时间 + 占空比整数化 ─────────────────────
  *
- * 假想对象：转速是一阶惯性环节，静态增益 K、时间常数 τ：
- *     d(rpm)/dt = (K·duty − rpm) / τ
+ * 这三个特征**都是板上实测到的**，缺一个这个仿真就抓不到真实的整定错误：
+ *   · 静态增益 K ≈ 163 rpm/%（README 实测拟合）
+ *   · 时间常数 τ ≈ 1.4 s      （2026-10-11 阶跃辨识 20%→60%）
+ *   · 死区约 0.3 s            （阶跃响应起步那段平坦）
+ *   · 固件把占空比落成**整数百分比**，1% = 163 rpm，这是个很粗的执行器
  *
- * 用 README 实测的 K ≈ 163 rpm/%（20/50/100% → 3347/8527/16456 的最小二乘拟合），
- * τ 取 0.3 s（**假定值，待实测**），PI 用 IMC 整定推出的初值。
- *
- * 断言的是**收敛性**而不是某一步的具体数值：200 拍（20 s）后转速应贴住目标，
- * 且最后一段时间不再漂移——后者能抓出「参数过于激进导致极限环」这类问题。
+ * 为什么必须带死区：本工程第一版按假定的 τ=0.3 s 整定，板上**持续振荡**
+ * （2717~9868 rpm，周期约 4.5 s）。用不带死区的模型仿真时它却是稳定的——
+ * 也就是说，**没有死区的仿真会给出虚假的通过**。这条用例的意义就在这里。
  */
-static void test_closes_loop_on_first_order_plant(void)
+#define PLANT_GAIN      (163.0f)    /* rpm / % */
+#define PLANT_TAU_S     (1.4f)      /* s */
+
+/*
+ * 等效死区。
+ *
+ * 阶跃响应上肉眼可见的平坦段只有约 0.3 s，但**光有 0.3 s 复现不出板上的振荡**：
+ * 第一版增益在这种模型下仿真通过，上板却持续振。说明真实环路里的滞后比
+ * 「纯延时」更多——量测通路（FG 周期 + EMA）、风扇内部的二阶动态，都被这里
+ * 这个参数一并吸收了。
+ *
+ * 取 0.8 s 的依据是**标定到能复现实测现象**：这个值下，第一版增益仿真出
+ * 持续极限环（与板上一致），而现在的增益稳定。测试的价值就在这条区分度上——
+ * 死区取得太小，测试会给出虚假的通过。
+ */
+#define PLANT_DEAD_S    (0.8f)
+#define PLANT_DELAY_MAX (32U)
+
+static float   g_delay[PLANT_DELAY_MAX];
+static uint8_t g_delay_len;
+static uint8_t g_delay_idx;
+
+static void plant_reset(uint8_t delay_samples)
 {
-    const float plant_gain = 163.0f;    /* rpm / % */
-    const float plant_tau  = 0.3f;      /* s */
-    const float dt         = 0.1f;
-    const float target     = 6000.0f;
+    for (uint8_t i = 0U; i < PLANT_DELAY_MAX; i++) {
+        g_delay[i] = 0.0f;
+    }
+    g_delay_len = (delay_samples == 0U) ? 1U : delay_samples;
+    g_delay_idx = 0U;
+}
+
+/** @brief 推进一步对象：占空比经死区延时后作用到一阶惯性环节上。 */
+static float plant_advance(float duty, float rpm, float dt_s)
+{
+    const float applied = g_delay[g_delay_idx];
+
+    /* 占空比在固件里是整数百分比，仿真的输入也照此量化 */
+    g_delay[g_delay_idx] = (float)((int)(duty + 0.5f));
+    g_delay_idx = (uint8_t)((g_delay_idx + 1U) % g_delay_len);
+
+    const float steady = PLANT_GAIN * applied;
+
+    return rpm + ((steady - rpm) * (dt_s / PLANT_TAU_S));
+}
+
+/**
+ * 在**实测辨识出来的对象**上做闭环仿真——本文件里最关键的一条。
+ *
+ * 增益取的是 app/app_control.c 里的发布值（IMC，λ = 2.5τ）。
+ * 断言的是**收敛与不振荡**，而不是某一步的具体数值：
+ *   ① 40 s 后转速贴住目标；
+ *   ② 末段 5 s 的峰峰波动很小（抓「参数过于激进导致极限环」）。
+ */
+static void test_closes_loop_on_identified_plant(void)
+{
+    const float   dt     = 0.1f;
+    const float   target = 6000.0f;
+    const uint8_t dead_n = (uint8_t)((PLANT_DEAD_S / dt) + 0.5f);
 
     const pi_config_t cfg = {
-        .kp                     = 0.0037f,
-        .ki                     = 0.0123f,
+        .kp                     = 0.0034f,
+        .ki                     = 0.0025f,
         .out_min                = 0.0f,
         .out_max                = 100.0f,
         .out_rate_limit_per_s   = 0.0f,
@@ -350,30 +403,32 @@ static void test_closes_loop_on_first_order_plant(void)
 
     TEST_ASSERT_EQUAL_INT(ERR_OK, pi_init(&pi, &cfg));
     TEST_ASSERT_EQUAL_INT(ERR_OK, pi_reset(&pi, 0.0f));
+    plant_reset(dead_n);
 
-    for (int i = 0; i < 200; i++) {
+    for (int i = 0; i < 400; i++) {          /* 40 s */
         TEST_ASSERT_EQUAL_INT(ERR_OK, pi_step(&pi, target, rpm, dt, &duty));
-        rpm += (plant_gain * duty - rpm) * (dt / plant_tau);
+        rpm = plant_advance(duty, rpm, dt);
     }
 
-    /* 收敛：误差在目标的 1% 以内 */
-    TEST_ASSERT_FLOAT_WITHIN(target * 0.01f, target, rpm);
+    TEST_ASSERT_FLOAT_WITHIN(target * 0.02f, target, rpm);
 
-    /* 稳态工作点合理：6000 rpm 需要约 6000/163 ≈ 36.8% 的占空比 */
-    TEST_ASSERT_FLOAT_WITHIN(5.0f, target / plant_gain, duty);
+    /* 稳态工作点合理：6000 rpm 需要约 (6000−190)/163 ≈ 35.6% */
+    TEST_ASSERT_FLOAT_WITHIN(4.0f, (target - 190.0f) / PLANT_GAIN, duty);
 
-    /* 不振荡：再跑 50 拍，不应出现极限环（转速保持贴合、输出不再大幅摆动） */
-    const float rpm_before = rpm;
-    const float duty_before = duty;
+    /* 再跑 50 拍（5 s），确认没有极限环。
+       容许的峰峰波动就是 1% 占空比的量化台阶（163 rpm），留一倍余量。 */
+    float lo = 1.0e9f;
+    float hi = -1.0e9f;
 
     for (int i = 0; i < 50; i++) {
         TEST_ASSERT_EQUAL_INT(ERR_OK, pi_step(&pi, target, rpm, dt, &duty));
-        rpm += (plant_gain * duty - rpm) * (dt / plant_tau);
+        rpm = plant_advance(duty, rpm, dt);
+
+        if (rpm < lo) { lo = rpm; }
+        if (rpm > hi) { hi = rpm; }
     }
 
-    TEST_ASSERT_FLOAT_WITHIN(target * 0.01f, target, rpm);
-    TEST_ASSERT_FLOAT_WITHIN(1.0f, rpm_before, rpm);
-    TEST_ASSERT_FLOAT_WITHIN(1.0f, duty_before, duty);
+    TEST_ASSERT_FLOAT_WITHIN(320.0f, 0.0f, hi - lo);
 }
 
 /* ---------------------------------------------------------------- main */
@@ -399,7 +454,7 @@ int main(void)
     RUN_TEST(test_reset_clamps_output_into_range);
     RUN_TEST(test_set_gains_keeps_state);
 
-    RUN_TEST(test_closes_loop_on_first_order_plant);
+    RUN_TEST(test_closes_loop_on_identified_plant);
 
     return UNITY_END();
 }

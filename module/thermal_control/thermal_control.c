@@ -62,6 +62,21 @@ static uint8_t duty_to_percent(float duty_f, uint8_t duty_min_effective)
 }
 
 /**
+ * @brief 「占空比下限所能达到的最低转速」——物理可达区间的下沿。
+ *
+ * 4 线风扇在 <20%（`duty_min_effective_percent`）时行为未定义，所以实际能用
+ * 的转速只有 `{0} ∪ [本值, 满速]`。曲线是连续的，低端必然经过一段**不可达**
+ * 的转速，那一段必须被抬上来。
+ *
+ * 依据 `fan_control` 的经验模型：rpm ≈ 163 × duty% + 190 → 20% 时约 3450。
+ */
+static uint32_t thermal_min_reachable_rpm(uint8_t duty_min_percent)
+{
+    return (uint32_t)(((uint32_t)FAN_CONTROL_RPM_PER_PERCENT * (uint32_t)duty_min_percent)
+                      + (uint32_t)FAN_CONTROL_RPM_INTERCEPT);
+}
+
+/**
  * @brief 算本拍的真实时长（秒）。
  *
  * 首拍没有参考点，退化为标称周期；同一 tick 内被调用两次也退化为标称周期
@@ -98,6 +113,27 @@ static float thermal_control_dt_s(const thermal_controller_t *ctl, uint32_t now_
  * @param want     当前认定的状态（会被更新）。
  * @param need     需要连续多少次才翻转。
  */
+/**
+ * @brief 这个转速读数是否算「FG 信号确实断了」的证据。
+ *
+ * 只有两种算：
+ *   · ERR_TIMEOUT   —— 超过 1 s 没有新沿（bsp 内部已经在计时，所以这一条
+ *                      本身就已经是相当确定的信号）；
+ *   · ERR_UNDERFLOW —— 间隔长到不足 1 RPM，实质等同停转。
+ *
+ * **不算**的两种，都会在风扇每次启动时凭空报一次故障：
+ *   · ERR_NOT_READY —— 刚起转、只捕获到一个沿，还没凑出间隔（正常瞬态）；
+ *   · ERR_OVERFLOW  —— FG 线上的毛刺，本来就该被忽略。
+ */
+static bool tach_evidence_lost(bool valid, error_t status)
+{
+    if (valid) {
+        return false;
+    }
+
+    return (status == ERR_TIMEOUT) || (status == ERR_UNDERFLOW);
+}
+
 static void debounce_step(uint16_t *streak, bool observed, bool *want, uint16_t need)
 {
     if (observed == *want) {
@@ -220,7 +256,16 @@ error_t thermal_control_step(thermal_controller_t *ctl,
     /* ---- 目标转速 ---- */
     uint32_t target_rpm = ctl->cfg.fallback_rpm;
 
-    if (!ctl->in_temp_fallback && (temp != NULL)) {
+    /*
+     * ⚠️ 这里必须同时要求 `temp->valid`，不能只看指针非空。
+     *
+     * `temperature_from_adc_raw()` 在量程尽头（raw=0 短路 / raw=4095 断路）
+     * **仍然会写一个端点温度**到 milli_c 里，同时返回 ERR_UNDERFLOW / OVERFLOW。
+     * 若只看指针，那么「NTC 刚被拔掉、去抖还没走完」的那三拍（300 ms）里，
+     * 控制器会拿这个端点值去算目标——读到「极热」就冲到满速、读到「极冷」就停转。
+     * 既然已经判定这个读数无效，就**不该用它**：那几拍按兜底目标走即可。
+     */
+    if (!ctl->in_temp_fallback && (temp != NULL) && temp->valid) {
         /*
          * 偏移加在**设定温度**上：调大偏移 = 曲线右移 = 风扇起步更晚 = 更暖。
          * 所以这里是 temp − offset，不是 temp + offset。
@@ -228,6 +273,24 @@ error_t thermal_control_step(thermal_controller_t *ctl,
         (void)fan_curve_eval(&ctl->curve_state,
                              temp->milli_c - ctl->cfg.temp_offset_milli_c,
                              &target_rpm);
+    }
+
+    /*
+     * 把目标夹进**物理可达区间**：0 或 [最小可达转速, 满速]。
+     *
+     * 2026-10-11 上板实测暴露的问题：曲线低端给出 619 rpm 这样的目标，
+     * 而空调比下限 20% 对应约 3450 rpm —— 目标永远够不到，PI 只好长期贴在
+     * 饱和边界上。现象上风扇转得没错（本来就该是 20%），但「目标 vs 实测」
+     * 在屏上和遥测里永远是一对够不着的数，`RPM_NOT_TRACKING` 的语义也说不清。
+     *
+     * 夹进可达区间之后，PI 的目标始终可达，它就不会长期贴在饱和边上；
+     * 这条不变量对**任何**曲线都成立，不必指望每条曲线都画得恰好。
+     */
+    const uint32_t min_reachable_rpm =
+        thermal_min_reachable_rpm(ctl->cfg.duty_min_effective_percent);
+
+    if ((target_rpm > 0U) && (target_rpm < min_reachable_rpm)) {
+        target_rpm = min_reachable_rpm;
     }
 
     /* ---- 转速测量（EMA 抑制 FG 量化噪声） ---- */
@@ -246,9 +309,23 @@ error_t thermal_control_step(thermal_controller_t *ctl,
         ctl->rpm_filtered_valid = true;
     }
 
-    /* ---- 转速丢失（去抖） ---- */
-    debounce_step(&ctl->tach_lost_streak, !rpm_valid, &ctl->tach_lost,
-                  ctl->cfg.invalid_debounce_samples);
+    /* ---- 转速丢失（去抖） ----
+       两个前提缺一不可，否则会**误报**：
+
+       ① 只有「我们确实要求它转」时，缺反馈才算故障。目标转速为 0 时风扇本就
+          该停，没有 FG 沿是**预期行为**——2026-10-11 上板实测踩到：室温下
+          目标为 0、风扇停着，系统却一直挂在 DEGRADED + !TACH。 */
+    if (target_rpm == 0U) {
+        ctl->tach_lost        = false;
+        ctl->tach_lost_streak = 0U;
+    } else {
+        /* ② 只有确定性的「没信号」才算证据（见 tach_evidence_lost）。 */
+        const error_t rpm_status = (rpm != NULL) ? rpm->status : ERR_TIMEOUT;
+        const bool    missing    = tach_evidence_lost(rpm_valid, rpm_status);
+
+        debounce_step(&ctl->tach_lost_streak, missing, &ctl->tach_lost,
+                      ctl->cfg.invalid_debounce_samples);
+    }
 
     /* ---- 控制律 ---- */
     bool  use_pi = false;
