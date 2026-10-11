@@ -25,11 +25,14 @@
 #   → PSC = 0, ARR = 6719（计数器从 0 数到 ARR 共 6720 个数）。
 #
 # ── 键名出处 ─────────────────────────────────────────────────────────
-#   模式名 "PWM Generation CH1"：`cubemx.py probe . TIM1` 列出的可选项。
+#   模式名 "PWM Generation CH1"：取自 CubeMX 自带的 IP 定义文件
+#     <CubeMX>/db/mcu/IP/TIM1_8-gptimer2_v2_x_Cube_Modes.xml 里该 Mode 的
+#     UserName。（界面上的名字与这个 UserName 是同一个来源。）
 #   通道键 "Channel-PWM Generation1 CH1"：CubeMX 自己 apply 后写进 .ioc 的
 #     原样键名（`SH.S_TIM1_CH1.0=TIM1_CH1,PWM Generation1 CH1` 也一并生成）。
-#   AF 引脚的 GPIO 键是 GPIO_Mode（不是 GPIO 输出脚的 GPIO_ModeDefaultOutputPP），
-#     取值 GPIO_MODE_AF_OD：依据 CubeMX 自带板级模板
+#   AF 引脚的 GPIO 键是 GPIO_ModeDefaultPP（取值 GPIO_MODE_AF_OD）——注意它
+#     与**普通输出脚**的 GPIO_ModeDefaultOutputPP 不是同一个键，写错会静默
+#     不生效。依据是 CubeMX 自带的板级模板
 #     db/plugins/boardmanager/boards/C41_Discovery_STM32F401C-DISCO_..._AllConfig.ioc
 #     （PB6/PB9 的 I2C AF 开漏脚就是这套键）。
 # =====================================================================
@@ -64,7 +67,7 @@ set ip parameters TIM1 Period 6719
 #     RPM = 60 / (T · 2 · 1e-6) = 30e6 / T
 #   例：1000 RPM → T = 30000 µs → 30e6/30000 = 1000 ✓
 #
-# ── ⚠️ 模式名必须用「内部名」，不能用 probe 列出的那个 ─────────────────
+# ── ⚠️ 模式名必须用 IP 定义里的「内部名」，不能用界面显示的那个 ────────
 #   实测（2026-10-11，F407 + CubeMX 6.15）：
 #     `set mode TIM2 "Input Capture direct mode"`  → **配到了 CH1**，
 #        还把 PA5 抢走当 TIM2_CH1_ETR（.ioc 里出现 PA5.Signal=S_TIM2_CH1_ETR）。
@@ -80,7 +83,7 @@ set ip parameters TIM1 Period 6719
 #     TIM2.Channel-Input_Capture2_from_TI2=TIM_CHANNEL_2
 #   验证方法（不动工程）：把 .ioc 复制到临时目录，对副本跑 apply 再看结果。
 #
-#   引脚信号 TIM2_CH2：`probe . PA1` 列出的可选项。
+#   引脚信号 TIM2_CH2：CubeMX 引脚视图里 PA1 的可选信号之一。
 # =====================================================================
 
 set mode TIM2 "Input_Capture2_from_TI2"

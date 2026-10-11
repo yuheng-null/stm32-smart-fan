@@ -12,10 +12,13 @@
 OLED 视图，业务逻辑全部在 `module/` 下且为**纯计算**，
 用宿主机单元测试覆盖（见下面的「测试」）。
 
-> ⚠️ **两处尚未标定**，都已在代码与文档里显式标注、并在界面上以报警位提示：
-> NTC 的两点校准、rpm 的绝对倍率。测量方法见
-> [`docs/control.md`](docs/control.md) 的「待标定」。
-> （风扇的机电时间常数 τ 已于 2026-10-11 实测，PI 增益据此整定。）
+> **两处物理刻度支持现场标定**：NTC 的温度刻度、rpm 的绝对倍率。两者按器件的
+> 标称值入场（NTC 取该型模块常见的 10 kΩ / B = 3950，rpm 按 FG 每转 2 脉冲），
+> 标定步骤见 [`docs/control.md`](docs/control.md) 的「标定」。
+> **标定与否都不影响控制正确性**：曲线的横轴与内环的转速取自同一条换算链，
+> 倍率误差在闭环内被消掉，它只决定屏上数字的物理含义。
+> 界面上的 `!CAL` 报警位就是这件事的状态指示——标定完成后自动熄灭。
+> （风扇的机电时间常数 τ ≈ 1.4 s 已由板上阶跃辨识得到，内环 PI 据此整定。）
 
 ---
 
@@ -111,7 +114,7 @@ OLED 视图，业务逻辑全部在 `module/` 下且为**纯计算**，
 | `0x01` | `!TEMP` | 温度读数无效 | 连续 3 拍（300 ms）读不到有效温度 | 进 `DEGRADED`，风扇维持安全转速不停 |
 | `0x02` | `!TACH` | FG 测速无信号 | **要求它转**（目标 > 0）却连续 3 拍没有有效转速 | 进 `DEGRADED`，内环切开环前馈 |
 | `0x04` | `!TRACK` | 内环长时间追不上目标 | 偏差持续 >20% 达 3 s | 只报警，不改策略 |
-| `0x08` | `!CAL` | **NTC 参数未标定** | **上电即常亮**，直到做两点校准 | 温度绝对值不可信，只看趋势 |
+| `0x08` | `!CAL` | **NTC 标定状态** | 出厂即亮，完成两点校准后熄灭 | 提示当前温度按标称 NTC 参数换算；要绝对刻度就用遥测里的原始 `adc` |
 | `0x10` | `!OLED` | 屏幕不在 | 开机探测不到 0x3C/0x3D | 仅显示降级，**不影响控制** |
 
 > `!TACH` 有一条容易搞反的规则：**风扇被命令停转时，FG 没有沿是预期行为，
@@ -191,6 +194,14 @@ OLED 视图，业务逻辑全部在 `module/` 下且为**纯计算**，
 
 `seq` 用于**检测丢帧**；`adc` 是**不受标定影响的原始量**，校准以它为准。
 
+`tools/` 下的脚本需要两个第三方库（抓串口用 pyserial，画图用 matplotlib）：
+
+```bash
+python -m pip install -r tools/requirements.txt
+```
+
+装好之后：
+
 ```bash
 python tools/capture_serial.py --echo="STREAM 1" --seconds 30
 python tools/plot_telemetry.py %TEMP%/smart_fan_serial_capture.txt
@@ -233,9 +244,9 @@ python tools/fan_demo.py          # 自动跑阶跃 + 闭环，重画这两张�
 也就是说**实测端已经贴到执行器分辨率的极限**：不是控制器不想更准，而是
 占空比只有 0~100 这一档整数可调，再往下就得靠提高 PWM 分辨率或换测速方式了。
 
-> ⚠️ 曲线的横轴（温度）在 NTC 标定之前是**假设值**，所以这里的「目标转速」
-> 来自曲线 + 偏移，不是某个物理温度的权威映射。纵轴与内环同源，因此闭环
-> 正确性与这个不确定性无关。
+> 曲线的横轴（温度）按 NTC 的标称参数换算，完成两点校准后即为绝对温度。
+> 这里的「目标转速」来自曲线 + 偏移，纵轴与内环同源，所以闭环正确性
+> 与温度的绝对刻度无关。
 
 ---
 
@@ -354,10 +365,10 @@ OLED: OK
 | `SYSCLK` | 时钟树对不对。**这行本身就是独立验证**：主频算错时串口波特率跟着错，整屏都是乱码，你根本读不到这行 |
 | `I2C scan` / `OLED: OK` | 屏有没有应答、用了哪个地址 |
 | 模式码 | `INIT` / `OFF` / `MANUAL` / `AUTO` / `DEGR` / `FAULT` |
-| `T` | 换算出的温度。**未校准，只看趋势**；无效时显示 `---` |
+| `T` | 换算出的温度（按 NTC 标称参数；做完两点校准即为绝对刻度）；无效时显示 `---` |
 | `adc` | ADC 原始计数（0~4095）。**这是没经过任何假设的数字**，校准以它为准 |
 | `duty` | 当前占空比（%）。恒为 `0` 或 `≥20`——4 线风扇 <20% 行为未定义 |
-| `rpm` | `实测 -> 目标`。**绝对倍率尚未用铭牌标定**（见下） |
+| `rpm` | `实测 -> 目标`。绝对刻度由 FG 每转脉冲数决定，标定方法见下 |
 | `alarms` | 报警位图（十六进制）：`01`=!TEMP `02`=!TACH `04`=!TRACK `08`=!CAL `10`=!OLED |
 
 `alarms` 里 **`0x08`（!CAL）在 NTC 标定之前会一直亮着**——这是有意为之，
@@ -424,15 +435,16 @@ OLED: OK
 > 之所以没有默认保留：它会让引脚停在一个非正常状态、必须复位才能继续，
 > 放在日常可用的控制台里是个陷阱。
 
-#### RPM 绝对倍率待标定
+#### RPM 绝对倍率：标定方法
 
-`rpm` 的换算基于两个假设：FG **每转 2 个脉冲**（Intel 规范值）、且**每个边沿只被
-捕获一次**。实测 100% 时读到约 16400 rpm，线性度很好，但绝对值还没和铭牌对过。
+`rpm` 的换算基于两个约定：FG **每转 2 个脉冲**（Intel 规范值）、且**每个边沿只被
+捕获一次**。实测 100% 时读到约 16400 rpm，线性度很好。
 
-> **这一条不影响控温的正确性**：曲线的纵轴与内环用的是同一个「观测转速」，
-> 倍率误差在闭环内被消掉，只影响屏上数字的物理含义。
-> 标定后把曲线纵轴与经验模型常数**按同一倍率**一起缩放即可。
-> 详见 [`docs/control.md`](docs/control.md) 的「待标定」。
+> **绝对刻度不影响控温的正确性**：曲线的纵轴与内环用的是同一个「观测转速」，
+> 倍率误差在闭环内被消掉，它只决定屏上数字的物理含义。
+> 要和风扇铭牌对齐时，把曲线纵轴与经验模型常数**按同一倍率**一起缩放即可
+> （两者必须始终同单位，否则前馈与闭环会各说各话）。
+> 详见 [`docs/control.md`](docs/control.md) 的「标定」。
 若与风扇铭牌差一个固定倍数，两个可能：**每转脉冲数不是 2**（改
 `FAN_CONTROL_PULSES_PER_REV`），或 **FG 边沿有振铃被重复捕获**——后者目前只用
 STM32 内部约 40 kΩ 上拉、且未开输入滤波器，修法是开 TIM2 的输入捕获数字滤波器，
@@ -452,6 +464,7 @@ CubeMX 重建不出对应状态就整块**静默丢弃**——不报错、不警
 python tools/cubemx_apply.py apply      . "cube-recipes/r1-hse-usart-swd.txt"
 python tools/cubemx_apply.py apply      . "cube-recipes/r2-时钟树.txt"   # 必须在 r1 之后
 python tools/cubemx_apply.py apply      . "cube-recipes/r3-oled-ntc-key.txt"
+python tools/cubemx_apply.py apply      . "cube-recipes/r4-fan-relay-buzzer.txt"
 python tools/cubemx_apply.py roundtrip  .                               # 验证改动被接受
 python tools/cubemx_apply.py regenerate .                               # 生成代码
 ```
@@ -484,7 +497,7 @@ python tools/cubemx_apply.py regenerate .
 
 | 文件 | 内容 |
 |---|---|
-| [`docs/control.md`](docs/control.md) | **控制算法、状态机、整定与待标定项** —— 每个参数的来历 |
+| [`docs/control.md`](docs/control.md) | **控制算法、状态机、整定与标定步骤** —— 每个参数的来历 |
 | [`docs/hardware.md`](docs/hardware.md) | **引脚分配表、接线图、电气要求**（3.3V 的理由、上拉来源、采样时间依据） |
 | [`docs/architecture.md`](docs/architecture.md) | 分层规则、依赖方向、CubeMX 管辖边界、验证纪律、F4 与 F1 的平台差异 |
 | [`docs/walkthrough.md`](docs/walkthrough.md) | **从空文件夹到跑通的完整操作记录**，每步附验收标准 |
@@ -521,7 +534,8 @@ smart_fan/
 ├── docs/            架构说明 + 控制文档 + 完整开发过程记录
 ├── tools/           cubemx_apply.py（配置下达）、capture_serial.py（串口抓取）、
 │                    plot_telemetry.py（遥测抽取与绘图）、
-│                    fan_demo.py（阶跃辨识 + 闭环演示，生成 README 里的图）
+│                    fan_demo.py（阶跃辨识 + 闭环演示，生成 README 里的图）、
+│                    requirements.txt（上面几个脚本的 Python 依赖）
 ├── .github/         CI：宿主机单测 + 固件交叉编译
 └── .vscode/         clangd / CMake Tools / 断点调试配置
 ```

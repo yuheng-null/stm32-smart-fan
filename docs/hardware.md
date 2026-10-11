@@ -166,8 +166,8 @@ APB2 分频 = 2 → PCLK2 = 84 MHz → 定时器时钟 = 2×84 = **168 MHz**，
 VCC 驱动，所以 MCU 侧只是给一个电平、不是给功率。
 
 **线圈走独立 5V 是有意的**：那 70~90 mA 若压在板子 3.3V 轨上，会和 OLED、
-蜂鸣器抢余量（本工程有过一次「接新模块后 OLED 一度不亮」的未定论现象）。
-另有旁证：继电器吸合期间串口 `drop` / `err` 全程为 0、板子连续运行不复位。
+蜂鸣器抢余量。实测旁证：继电器吸合期间串口 `drop` / `err`
+全程为 0、板子连续运行约 148 秒无复位。
 
 ### 有源蜂鸣器模块（低电平触发）
 
@@ -256,5 +256,5 @@ ACK 检测正是靠这一点。
 | 路径 | 谁管 | 手写代码能否放 |
 |---|---|---|
 | `Core/`、`Drivers/`、`cmake/stm32cubemx/`、`startup_*.s`、`*.ld` | CubeMX | **只能放 `/* USER CODE BEGIN */ ~ END */` 内** |
-| `CMakeLists.txt`（顶层）、`cmake/*.cmake` | 只生成一次 | 可以放心手写 |
+| `CMakeLists.txt`（顶层）、`cmake/` 下的构建脚本（`*.cmake` 工具链文件与 `cmake/stm32cubemx/CMakeLists.txt`） | 只生成一次，之后不重写 | 可以放心手写 |
 | `app/` `bsp/` `driver/` `interface/` `module/` `docs/` `tools/` | 你 | 随便写 |

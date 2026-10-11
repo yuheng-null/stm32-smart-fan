@@ -104,8 +104,8 @@ CLI 和 GUI 都没有「生成到 `platform/stm32f407/` 下」这个选项。要
 | 路径 | 谁管 | 手写代码能否放 |
 |---|---|---|
 | `Core/`、`Drivers/`、`cmake/stm32cubemx/`、`startup_*.s`、`*.ld` | CubeMX | **只能放 `/* USER CODE BEGIN */ ~ END */` 块内**。块外改了，下次生成就没了 |
-| `CMakeLists.txt`（顶层）、`cmake/stm32cubemx/CMakeLists.txt` | 只生成一次，之后不重写 | 可以放心手写 |
-| `app/` `bsp/` `interface/` `module/` `docs/` `tools/` | 你 | 随便写 |
+| `CMakeLists.txt`（顶层）、`cmake/` 下的构建脚本（`*.cmake` 工具链文件与 `cmake/stm32cubemx/CMakeLists.txt`） | 只生成一次，之后不重写 | 可以放心手写 |
+| `app/` `bsp/` `driver/` `interface/` `module/` `docs/` `tools/` | 你 | 随便写 |
 
 判断某文件会不会被覆盖：看工程根的 `.mxproject` 里的 `[PreviousGenFiles]` 段，
 不在其中的文件不会被重新生成。
@@ -194,10 +194,10 @@ python tools/cubemx_apply.py apply . cube-recipes/r2-时钟树.txt
 （τ ≈ 1.4 s），第一版按假定值整定曾导致持续振荡——完整经过见
 [`control.md`](control.md) §4。
 
-**尚未完成**：NTC 两点校准、rpm 绝对倍率与铭牌的对标 —— 两者都是
-**选做项**，只影响显示数字的物理含义，不影响控制正确性
-（闭环对倍率误差免疫，见 [`control.md`](control.md)）。测量方法都写在
-[`control.md`](control.md) 的「待标定」一节。
+**标定**：NTC 的温度刻度与 rpm 的绝对倍率按器件标称值入场，都支持现场标定。
+两者只影响显示数字的**物理刻度**，不影响控制正确性
+（闭环对倍率误差免疫，见 [`control.md`](control.md)）。标定步骤写在
+[`control.md`](control.md) 的「标定」一节。
 
 **验证纪律**：改完控制逻辑后按 README 的「上板验收清单」过一遍 ——
 编译通过、单测全绿、CI 绿都证明不了硬件行为，那是唯一能证明的一层。
