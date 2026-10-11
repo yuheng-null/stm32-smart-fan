@@ -37,14 +37,14 @@ DRIVER/bus     ──►  INTERFACE、PLATFORM
 
 ```
 module/ 内部（叶子只依赖 interface/ 与 common/）
-    fan_control   fan_curve   pi_control   fan_fsm   console   telemetry   display_view
+    fan_control  fan_curve  pi_control  fan_fsm  console  telemetry  display_view  ir_remote
          ▲             ▲            ▲
          │             │            │
          └─────── thermal_control ──┘        ← 唯一的「组合」模块
 ```
 
 - **叶子**：`fan_control`、`fan_curve`、`pi_control`、`fan_fsm`、`console`、
-  `telemetry`、`display_view` —— 只依赖 `interface/` 与 `module/common/`，
+  `telemetry`、`display_view`、`ir_remote` —— 只依赖 `interface/` 与 `module/common/`，
   互不认识。
 - **组合**：`thermal_control` 可以依赖 `fan_curve`、`pi_control`、`fan_control`
   —— 它本来就是「把算法拼起来」的那一层。

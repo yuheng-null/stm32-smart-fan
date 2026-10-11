@@ -13,7 +13,8 @@ module/
 ├── fan_fsm/          运行模式状态机（纯策略，不含数值算法）
 ├── console/          串口行命令解析（字节流 → 命令结构）
 ├── telemetry/        遥测帧格式化（状态 → 一行文本）
-└── display_view/     OLED 视图模型（状态 → 几行文本，约束每行宽度）
+├── display_view/     OLED 视图模型（状态 → 几行文本，约束每行宽度）
+└── ir_remote/        NEC 红外解码（边沿 + 时长 → 帧；纯状态机）
 ```
 
 ## `module/` 内部的依赖规则
@@ -22,7 +23,7 @@ module/
 本工程对 module **之间**的依赖有一条明确规则：
 
 - **叶子模块**（`fan_control`、`fan_curve`、`pi_control`、`fan_fsm`、`console`、
-  `telemetry`、`display_view`）只依赖 `interface/` 与 `common/`，**互不认识**。
+  `telemetry`、`display_view`、`ir_remote`）只依赖 `interface/` 与 `common/`，**互不认识**。
 - **组合模块** `thermal_control` 可以依赖 `fan_curve`、`pi_control`、`fan_control`
   —— 它本来就是「把算法拼起来」的那一层。
 - **禁止反向、禁止成环。**
@@ -66,6 +67,24 @@ error_t  temperature_from_adc_raw(uint16_t raw, int32_t *milli_c);   /* 主接�
 （10 kΩ、B=3950，见模块型号）。要拿到绝对刻度就做一次两点校准，
 联立方程写在 [`temperature/temperature.h`](temperature/temperature.h) 顶部；
 校准前后都可在运行期用偏移把工作点移到合适的位置。
+
+## 当前实现：`ir_remote/`
+
+```c
+bool ir_remote_feed(ir_remote_t *ir, bool level_after, uint32_t interval_us, ir_frame_t *out);
+```
+
+一个 **NEC 协议的解码状态机**：吞进去的是「边沿 + 这个电平刚持续了多久」，
+吐出来的是一帧（地址/命令/是否重复）或一次拒帧。和其它模块一样是**纯计算**：
+不知道引脚、不知道定时器、不 include HAL——所以能在 PC 上用**合成波形**
+穷举地测（见 [`tests/test_ir_remote.c`](../tests/test_ir_remote.c)）。
+
+为什么值得拆成独立模块：红外一次误码要在整帧 32 位里定位到具体哪一位，
+在板子上几乎做不到；而合成波形不仅能测正常帧，还能**故意把某一段拉偏、丢一个沿、
+改一位**，逐条核对解码器是不是按预期失败。
+
+接线与 EXTI 的选型理由在 [`docs/hardware.md`](../docs/hardware.md)；
+键表与学习模式在 [`app_ir.c`](../app/app_ir.c) 与 README 的「四、红外遥控」一节。
 
 ## 控制相关的模块：先看 `docs/control.md`
 
