@@ -3,8 +3,9 @@
 
 用法::
 
-    python tools/cubemx_apply.py apply <工程根> <配方文件>
-    python tools/cubemx_apply.py roundtrip <工程根>
+    python tools/cubemx_apply.py apply      <工程根> <配方文件>
+    python tools/cubemx_apply.py roundtrip  <工程根>
+    python tools/cubemx_apply.py regenerate <工程根>
 
 为什么需要这个脚本
 ------------------
@@ -36,6 +37,22 @@
 （`~/.stm32cubemx/STM32CubeMX.log`，每次运行覆盖写）。本脚本会在跑完后
 把日志里的 `OptionalMessage` 行打出来——**那才是「取值合法」的判据**。
 
+`regenerate` 做的事
+-------------------
+
+`apply` **只改 `.ioc`，不生成代码**。要出代码必须再跑一次 CubeMX 的生成，
+本命令就是那一步。
+
+生成会**重写** `Core/` 下的文件，CubeMX 靠「读回 `USER CODE` 块」保留用户代码，
+而这个机制**偶尔会静默失效**（块被整段清空、返回码仍为 0、一句报错都没有）。
+所以本命令：
+
+1. 先把 `Core/` 下所有 `USER CODE` 块抓成快照（同时存一份原始文件到临时目录）；
+2. 跑 CubeMX 生成；
+3. 再抓一遍，逐块比对，**列出丢失和内容变化的块**。
+
+**丢了块就返回非 0**，并把快照路径打出来供比对。
+
 环境变量
 --------
 
@@ -45,7 +62,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -201,6 +220,103 @@ def parse_ioc(path: Path) -> dict[str, str]:
     return entries
 
 
+# 匹配 /* USER CODE BEGIN <名字> */ ... /* USER CODE END <名字> */
+# 名字里可能有空格（CubeMX 自己用的是 USART1_Init 0 这种），所以用 \S+ 之外的写法。
+_USER_BLOCK_RE = re.compile(
+    r"/\* USER CODE BEGIN ([^*]*?) \*/(.*?)/\* USER CODE END \1 \*/",
+    re.DOTALL,
+)
+
+# 生成过程会重写这些后缀的文件；其余（.ioc、CMakeLists 等）不在比对范围内。
+_USER_CODE_SUFFIXES = (".c", ".h")
+
+
+def snapshot_user_code(root: Path) -> dict[str, str]:
+    """抓取 Core/ 下所有 USER CODE 块。
+
+    返回值把块名映射到**去掉首尾空白的正文**，键形如
+    ``Core/Src/main.c:USART1_Init 0``。空块也会被抓到（正文为空串），
+    因为"块还在、只是被清空了"和"块整个没了"是两种不同的故障。
+    """
+    blocks: dict[str, str] = {}
+    core = root / "Core"
+    if not core.is_dir():
+        return blocks
+
+    for path in sorted(core.rglob("*")):
+        if path.suffix not in _USER_CODE_SUFFIXES or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        rel = path.relative_to(root).as_posix()
+        for name, body in _USER_BLOCK_RE.findall(text):
+            blocks[f"{rel}:{name.strip()}"] = body.strip()
+
+    return blocks
+
+
+def compare_user_code(before: dict[str, str],
+                      after: dict[str, str]) -> tuple[list[str], list[str]]:
+    """比对两次快照，返回 (丢失的块, 内容变化的块)。
+
+    新增的块不算问题——那正是新加外设的正常结果（CubeMX 会给它生成新的空块）。
+    """
+    lost = [k for k in sorted(before) if k not in after]
+    changed = [k for k in sorted(before)
+               if k in after and before[k] != after[k]]
+    return lost, changed
+
+
+def hash_tree(directory: Path) -> dict[str, str]:
+    """把目录下所有文件映射成「相对路径 -> 内容 sha256」。
+
+    用来判断生成前后**内容**变没变。刻意不用 mtime：实测 CubeMX 在
+    「生成结果与磁盘上已有的内容完全一致」时**不会重写文件**，
+    mtime 保持原样——拿它判「有没有生成」会误报。
+    """
+    digests: dict[str, str] = {}
+    if not directory.is_dir():
+        return digests
+
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            digests[path.relative_to(directory).as_posix()] = \
+                hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+
+    return digests
+
+
+def script_results(stdout: str, commands: list[str]) -> list[tuple[str, str]]:
+    """把 CubeMX 的回显配成 (命令, 结果) 列表。
+
+    CubeMX 在脚本模式下会把每条命令连同结果交替回显，中间还混着别的输出
+    （日志行、`Invalid condition id` 之类的噪音）。所以不能按行号硬对齐——
+    按命令原文定位，再往后找第一个恰好是 OK/KO 的行。
+
+    找不到回显时结果记作 "?"，调用方要把它和 KO 区分开处理。
+    """
+    results: list[tuple[str, str]] = []
+    for cmd in commands:
+        idx = stdout.find(cmd)
+        if idx < 0:
+            results.append((cmd, "?"))
+            continue
+        answer = "?"
+        for line in stdout[idx + len(cmd):].splitlines():
+            token = line.strip()
+            if token in ("OK", "KO"):
+                answer = token
+                break
+        results.append((cmd, answer))
+    return results
+
+
 def recipe_lines(path: Path) -> list[str]:
     """读配方文件：跳过空行与 `#` 注释，并挡住脚本自带的命令。"""
     lines: list[str] = []
@@ -328,6 +444,141 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
     return 1 if (hard_dropped or hard_changed) else 0
 
 
+def cmd_regenerate(args: argparse.Namespace) -> int:
+    root, ioc = resolve_project(args.project_dir)
+
+    if not (root / "Core").is_dir():
+        raise SystemExit(
+            f"{root} 里没有 Core/，这不像是一个已经生成过的工程。\n"
+            "（空文件夹要用新的工程来生成，见 docs/walkthrough.md 阶段 2~5。）"
+        )
+
+    entries = parse_ioc(ioc)
+    project_name = entries.get("ProjectManager.ProjectName", "").strip() or ioc.stem
+    toolchain = entries.get("ProjectManager.TargetToolchain", "").strip() or "CMake"
+
+    # ---- 1) 生成前快照 --------------------------------------------------
+    before = snapshot_user_code(root)
+    if not before:
+        raise SystemExit(
+            "在 Core/ 下没抓到任何 USER CODE 块——这很反常，先确认工程布局对不对，"
+            "不要在没快照的情况下生成。"
+        )
+
+    keep = Path(tempfile.mkdtemp(prefix="cubemx-regen-before-"))
+    shutil.copytree(root / "Core", keep / "Core")
+    before_files = hash_tree(root / "Core")
+    print(f"生成前: {len(before)} 个 USER CODE 块，Core/ 下 {len(before_files)} 个文件")
+    print(f"        原始文件已备份到 {keep / 'Core'}")
+
+    # ---- 2) 生成 --------------------------------------------------------
+    commands = [
+        f"config load {quoted(ioc)}",
+        f"project name {project_name}",
+        f"project toolchain {toolchain}",
+        f"project path {quoted(root.parent)}",
+        "project generate",
+        "exit",
+    ]
+
+    print(f"生成中: project={project_name} toolchain={toolchain} "
+          f"path={root.parent}")
+    with tempfile.TemporaryDirectory(prefix="cubemx-regen-") as work:
+        result = run_script(commands, Path(work))
+
+    stdout = result.stdout or ""
+    results = script_results(stdout, commands)
+
+    # ⚠️ 别拿单条命令的返回码当成败判据。
+    # 实测（本机 2026-10-11，路径含空格）：`project path` 会回 KO，
+    # 但 `project generate` 照常 OK、生成落点完全正确。
+    # 所以这里只把 KO 分成「已知无害」和「意外」两类做提示，
+    # **真正的判据是内容**（下面第 3 步）——看产物，不看返回码。
+    benign_ko = [cmd for cmd, res in results
+                 if res == "KO" and cmd.startswith("project path")]
+    fatal_ko = [cmd for cmd, res in results
+                if res == "KO" and not cmd.startswith("project path")]
+
+    for cmd in benign_ko:
+        print(f"   注意: `{cmd}` 回了 KO —— 实测这条不影响生成落点，"
+              "按已知无害处理，成败以下面的内容比对为准。")
+
+    if fatal_ko:
+        print("\n!! CubeMX 回了 KO：")
+        for cmd in fatal_ko:
+            print(f"     {cmd}")
+        print(stdout[-2000:])
+        report_messages()
+        return 1
+
+    # ---- 3) 内容比对：Core/ 下到底变没变 --------------------------------
+    # 判据只能是**内容**：实测 CubeMX 在生成结果与磁盘上已有内容完全一致时
+    # 不重写文件（mtime 不变），用 mtime 判「有没有生成」会误报。
+    after_files = hash_tree(root / "Core")
+    added = sorted(k for k in after_files if k not in before_files)
+    removed = sorted(k for k in before_files if k not in after_files)
+    modified = sorted(k for k in before_files
+                      if k in after_files and before_files[k] != after_files[k])
+
+    if added or modified:
+        print("\nCore/ 下的变化：")
+        for key in added:
+            print(f"     + {key}")
+        for key in modified:
+            print(f"     ~ {key}")
+    else:
+        print("\nCore/ 下没有任何内容变化（生成结果与磁盘上已有的一致）。")
+        print("   如果你这次改过 .ioc、且期望看到新外设的初始化代码，"
+              "这里一点变化都没有就值得怀疑。")
+
+    if removed:
+        print("\n!! 这些文件在生成后**被删掉了**：")
+        for key in removed:
+            print(f"     - {key}")
+        print(f"   生成前的副本在 {keep / 'Core'}，先别动工作区。")
+
+    # ---- 4) 比对 USER CODE ----------------------------------------------
+    after = snapshot_user_code(root)
+    lost, changed = compare_user_code(before, after)
+
+    print(f"\n生成后: {len(after)} 个 USER CODE 块（{len(before)} -> {len(after)}）")
+
+    if lost:
+        print("\n!! 这些块在生成后**整个消失了**：")
+        for key in lost:
+            print(f"     - {key}")
+        print(f"   生成前的原文在 {keep / 'Core'}，可以逐个恢复。")
+
+    if changed:
+        print("\n!! 这些块的**正文被改写了**：")
+        for key in changed:
+            print(f"     ~ {key}")
+
+    if lost or changed:
+        print(
+            "\n   别急着把代码重写一遍——那只治症状。诊断顺序：\n"
+            "   ① 有没有人绕过 CubeMX 手改过 .ioc？（头号嫌疑，但**因果未经证实**）\n"
+            "   ② 有没有改过 Core/ 里 USER CODE 块之外的内容？\n"
+            "   ③ 以上都不是，再怀疑工具本身，并记下可复现步骤。\n"
+            "   详见 docs/walkthrough.md 阶段 5。"
+        )
+        report_messages()
+        return 1
+
+    if removed:
+        print("\n   生成不该删文件。先看 .ioc 里是不是少了哪个外设，"
+              "再决定要不要从上面的备份恢复。")
+        report_messages()
+        return 1
+
+    print("OK: 所有 USER CODE 块都原样幸存。")
+    print("   下一步：去生成的 .c 里逐项找证据（别只看 .ioc）——"
+          "见 docs/architecture.md 的「验证纪律」。")
+    print("   再下一步：cmake --build build/Debug")
+    report_messages()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -341,6 +592,11 @@ def main() -> int:
     p = sub.add_parser("roundtrip", help="验证改动是否被 CubeMX 原样接受")
     p.add_argument("target", help="工程根目录（或 .ioc 路径）")
     p.set_defaults(func=cmd_roundtrip)
+
+    p = sub.add_parser("regenerate",
+                       help="就地重新生成代码（apply 之后必须跑这一步）")
+    p.add_argument("project_dir", help="工程根目录（或 .ioc 路径）")
+    p.set_defaults(func=cmd_regenerate)
 
     args = parser.parse_args()
     return args.func(args)

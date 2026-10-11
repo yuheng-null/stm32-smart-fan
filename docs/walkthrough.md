@@ -464,13 +464,50 @@ F4 的 ADC 挂在 PCLK2 = 84 MHz 上，而 `ClockPrescaler` 的默认档是 `/2`
 **判据永远是生成的代码，不是 `.ioc` 的键。** `.ioc` 缺一个键有两种完全不同的
 原因——命令落空、或值恰好等于默认——光看 `.ioc` 分不出来。
 
-### 12.4 `apply` 不生成代码
+### 12.4 `apply` 不生成代码——要用 `regenerate`
 
-`tools/cubemx_apply.py apply` 只把配方下达给 `.ioc`。要出代码得**再跑一次生成**
-（GUI 点 GENERATE CODE，或 `project generate` 脚本，`project path` 给**父目录**）。
+`tools/cubemx_apply.py apply` 只把配方下达给 `.ioc`，**不生成代码**。
+要出代码必须再跑一次：
+
+```bash
+python tools/cubemx_apply.py regenerate .
+```
+
 忘了这一步的症状：`main.h` 里没有新引脚的宏、`main.c` 里没有 `MX_ADC1_Init()`。
 
-生成前先快照 `Core/` 下所有 USER CODE 块，生成后逐块 diff 核对。
+它内部做的事：给 `Core/` 下所有 `USER CODE` 块拍快照（同时把整个 `Core/` 备份到临时目录）
+→ 跑 CubeMX 生成 → 逐块比对 → 比对 `Core/` 下文件的**内容**。
+USER CODE 丢了/被改了、或者有文件被删掉，都返回非 0。
+
+#### ⚠️ 写这个命令时踩到的两个坑，都关于「用什么当判据」
+
+**坑一：`project path` 会回 `KO`，但生成是好的。**
+
+实测本机（路径含空格），脚本模式下：
+
+```text
+project path "D:\c programing\embedded_learning"
+KO                      ← 这条回 KO
+project generate
+OK                      ← 生成照常成功，落点也正确
+```
+
+所以**不能拿单条命令的返回码当成败判据**。`regenerate` 的做法是把 KO 分成
+「`project path` 这种已知无害的」和「意外的」两类，后者才失败。
+
+**坑二：不能用 mtime 判断「有没有生成」。**
+
+第一版用 `mtime >= 开始时刻` 判断产物有没有落地，结果每次都在已经生成成功的情况下
+报「生成没有落地」。原因是 **CubeMX 在生成结果与磁盘上已有内容完全一致时根本不重写文件**，
+mtime 保持原样——你刚提交完、`.ioc` 又没改，重新生成时文件的确一个字节都不动。
+
+判据只能是**内容**：`regenerate` 对 `Core/` 下每个文件取 sha256 再比。
+「一点变化都没有」是**正常结果**（幂等生成），它还顺带提示一句
+「如果你刚改过 `.ioc` 却毫无变化，那才值得怀疑」。
+
+> 这两个坑是同一个教训的两次体现：**返回码、时间戳都是「代理指标」，
+> 真正要验的是产物本身。** 这和本文件收尾清单里那条
+> 「别把『命令返回 0』当成『功能正常』」是同一件事。
 
 ### 12.5 STM32F4 没有 ADC 校准
 
@@ -509,8 +546,9 @@ grep "hal_adc" cmake/stm32cubemx/CMakeLists.txt
 - [ ] `roundtrip` 报「原样保留」，且**没有白名单缺口**
 - [ ] **没有任何 `Parameter (X) has invalid value` / `not ready for code generation`**
       —— 这是唯一能证明「取值合法」的信号
-- [ ] `apply` 之后**另外跑过一遍代码生成**（`apply` 自己不生成代码）
-- [ ] 生成后把 `Core/` 下的 USER CODE 块**逐块 diff** 过，没有丢失或被改写
+- [ ] `apply` 之后**另外跑过 `regenerate`**（`apply` 自己不生成代码）
+- [ ] `regenerate` 报告 **USER CODE 块一个不少、正文没被改写**，且 `Core/` 下没有被删掉的文件
+- [ ] 别用返回码或 mtime 代替上面这条——判据是产物本身（见阶段 12.4）
 - [ ] `.ioc` 里缺的键，去**生成的代码**里确认过取值（缺键≠没生效，见阶段 12.3）
 - [ ] `SYSCLKFreq_VALUE` 等于目标主频
 - [ ] 去生成的 `.c` 里**逐项找到代码**，外设初始化函数**字段一个不少**

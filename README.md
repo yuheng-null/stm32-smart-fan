@@ -132,27 +132,29 @@ CubeMX 重建不出对应状态就整块**静默丢弃**——不报错、不警
 用仓库自带的 `tools/cubemx_apply.py` 喂给 CubeMX 自己的脚本模式：
 
 ```bash
-python tools/cubemx_apply.py apply     . "cube-recipes/r1-hse-usart-swd.txt"
-python tools/cubemx_apply.py apply     . "cube-recipes/r2-时钟树.txt"   # 必须在 r1 之后
-python tools/cubemx_apply.py apply     . "cube-recipes/r3-oled-ntc-key.txt"
-python tools/cubemx_apply.py roundtrip .                               # 验证改动
+python tools/cubemx_apply.py apply      . "cube-recipes/r1-hse-usart-swd.txt"
+python tools/cubemx_apply.py apply      . "cube-recipes/r2-时钟树.txt"   # 必须在 r1 之后
+python tools/cubemx_apply.py apply      . "cube-recipes/r3-oled-ntc-key.txt"
+python tools/cubemx_apply.py roundtrip  .                               # 验证改动被接受
+python tools/cubemx_apply.py regenerate .                               # 生成代码
 ```
 
-`apply` **只改 `.ioc`，不生成代码**。要出代码得再跑一次 CubeMX 的生成，
-在 CubeMX GUI 里点 GENERATE CODE，或脚本模式（注意 `project path` 给的是**父目录**）：
+`apply` **只改 `.ioc`，不生成代码**。要出代码必须再跑一次生成：
 
-```text
-config load <工程根>/smart_fan.ioc
-project name smart_fan
-project toolchain CMake
-project path <工程根>/..
-project generate
-exit
+```bash
+python tools/cubemx_apply.py regenerate .
 ```
 
-生成前先把 `Core/` 下所有 `USER CODE` 块快照下来，生成后逐块核对是否幸存——
-CubeMX 靠「读回这些块」保留用户代码，而这个机制**偶尔静默失效**（细节见
-[`docs/walkthrough.md`](docs/walkthrough.md) 阶段 5）。
+它会先给 `Core/` 下所有 `USER CODE` 块拍快照，生成后再逐块比对——
+**丢了或改了就返回非 0**，并把生成前的副本路径打出来。
+（CubeMX 靠「读回这些块」保留用户代码，而这个机制**偶尔静默失效**：
+块被整段清空、返回码还是 0、一句报错都没有。详见
+[`docs/walkthrough.md`](docs/walkthrough.md) 阶段 5。）
+
+> ⚠️ **别拿返回码判断生成成没成功。** 实测 `project path` 这条在脚本模式下会回 `KO`，
+> 而生成完全正常。`regenerate` 因此比对的是 `Core/` 下文件的**内容**——
+> 也不用 mtime：CubeMX 在生成结果与磁盘上已有内容一致时**不重写文件**，
+> mtime 不变，拿它判「有没有生成」会误报。
 
 > ⚠️ **时钟树必须分两遍跑**，原因写在 [`cube-recipes/r2-时钟树.txt`](cube-recipes/r2-时钟树.txt)
 > 顶部：`RCC.HSE_VALUE` 只在 CubeMX `config load` 那一刻被时钟模型读取，写在同一遍里
