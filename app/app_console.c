@@ -15,6 +15,8 @@
 
 #include "app/app_console.h"
 
+#include "app/app_ir.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -101,6 +103,65 @@ static bool console_make_sample(telemetry_sample_t *sample)
     sample->alarms       = status.alarms;
 
     return true;
+}
+
+/**
+ * @brief IR 命令：看遥控接收状态，或者开关学习模式。
+ *
+ * 学习模式只回显收到的码、不动风扇——换遥控器时正对着风扇按键，不会误触发。
+ */
+static void console_handle_ir(const console_command_t *cmd)
+{
+    if ((cmd->arg_i[0] == CONSOLE_IR_LEARN_ON) || (cmd->arg_i[0] == CONSOLE_IR_LEARN_OFF)) {
+        console_reply(cmd->verb,
+                      app_ir_set_learn(cmd->arg_i[0] == CONSOLE_IR_LEARN_ON));
+        return;
+    }
+
+    app_ir_status_t ir;
+
+    if (!app_ir_get_status(&ir)) {
+        console_reply(cmd->verb, ERR_NOT_INITIALIZED);
+        return;
+    }
+
+    char line[APP_CONSOLE_LINE_SIZE * 2U];
+    int  n;
+
+    if (ir.have_last) {
+        n = snprintf(line, sizeof(line),
+                     "  ir: last addr=0x%04X cmd=0x%02X (%s NEC)\r\n",
+                     (unsigned)ir.address, (unsigned)ir.command,
+                     ir.extended ? "扩展" : "标准");
+    } else {
+        n = snprintf(line, sizeof(line), "  ir: 还没收到过一帧\r\n");
+    }
+
+    if (n > 0) {
+        (void)app_console_send(line, (uint32_t)n);
+    }
+
+    /*
+     * 这一行同时回答了「遥控灵不灵」的两个问题：
+     *   · frames 一直不涨 —— 压根没收到，查接收头接线与供电；
+     *   · rejects 涨而 frames 不涨 —— 收得到但解不出，看 last 是卡在哪一段
+     *     （引导码? 位? 反码校验?），分别指向接线干扰、遥控器不兼容、
+     *     以及「码是对的但校验不过」这三类不同的问题；
+     *   · dropped 非 0 —— 主循环被长时间阻塞，边沿在缓冲里溢出了。
+     */
+    n = snprintf(line, sizeof(line),
+                 "  ir: frames=%lu repeats=%lu rejects=%lu (last: %s)"
+                 " | edges=%lu dropped=%lu%s\r\n",
+                 (unsigned long)ir.frames, (unsigned long)ir.repeats,
+                 (unsigned long)ir.rejects, ir.last_reject,
+                 (unsigned long)ir.edges, (unsigned long)ir.dropped,
+                 ir.learn ? "  [学习模式]" : "");
+
+    if (n > 0) {
+        (void)app_console_send(line, (uint32_t)n);
+    }
+
+    console_reply(cmd->verb, ERR_OK);
 }
 
 /** @brief 执行一条解析出来的命令。 */
@@ -192,6 +253,10 @@ static void console_execute(const console_command_t *cmd, error_t parse_result)
 
     case CONSOLE_CMD_RESET:
         console_reply(cmd->verb, app_control_dispatch_cmd(FAN_CMD_RESET, 0));
+        return;
+
+    case CONSOLE_CMD_IR:
+        console_handle_ir(cmd);
         return;
 
     case CONSOLE_CMD_UNKNOWN:

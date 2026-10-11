@@ -1,0 +1,68 @@
+# =====================================================================
+# 配方 r5：红外接收头（VS1838B，OUT → PC7）
+#
+# 用法（工程根执行）：
+#     python tools/cubemx_apply.py apply      . "cube-recipes/r5-ir-receiver.txt"
+#     python tools/cubemx_apply.py roundtrip  .
+#     python tools/cubemx_apply.py regenerate .
+#
+# 依赖：r1 / r3 已应用（本配方只动 PC7，与它们不重叠）。
+# =====================================================================
+#
+# ── 为什么用 EXTI 而不是定时器输入捕获 ───────────────────────────────
+#   红外解码要的是**双边沿**（载波突发的起止各一个沿，帧内两者交替出现），
+#   所以最先想到的是「输入捕获 + 双边沿」。
+#   但 CubeMX 的 TIM IP 定义里，输入捕获的极性只开放两档：
+#
+#     db/mcu/IP/TIM1_8-gptimer2_v2_x_Cube_Modes.xml
+#       <RefParameter Name="IC2Polarity" ...>
+#         <PossibleValue Value="TIM_ICPOLARITY_RISING"  .../>
+#         <PossibleValue Value="TIM_ICPOLARITY_FALLING" .../>
+#         <!-- <PossibleValue Value="TIM_ICPOLARITY_BOTHEDGE" .../> -->   ← 被注释掉了
+#       </RefParameter>
+#
+#   也就是说 GUI 与 CLI 都选不到双边沿。硬写 TIM_ICPOLARITY_BOTHEDGE 只会
+#   在 CubeMX 日志里得到一句 "Parameter (IC2Polarity) has invalid value"，
+#   而命令本身照样返回 OK —— 正是本工程反复强调的那种「全绿但错」。
+#   （F4 的 HAL 是支持双边沿的，TIM_ICPOLARITY_BOTHEDGE 就在
+#    stm32f4xx_hal_tim.h 里；限制在 CubeMX 这一层。）
+#
+#   于是改用 GPIO 的 **EXTI 双边沿中断**：CubeMX 支持
+#   GPIO_MODE_IT_RISING_FALLING，由中断服务程序读走时刻与电平。
+#   精度上的差别可以忽略：两次边沿的中断入口延迟是一样的，时长之差照样准。
+#
+# ── NVIC：配方之外还要补一行（脚本模式没有这个命令）──────────────────
+#   只跑上面那四条命令**不够**：实测（CubeMX 6.15）把引脚选成 EXTI 模式
+#   **不会**顺带勾上 NVIC，生成出来的 main.c 里没有 HAL_NVIC_EnableIRQ()，
+#   stm32f4xx_it.c 里也不会生成 EXTI9_5_IRQHandler——中断根本收不到。
+#
+#   脚本模式没有使能 NVIC 的命令（见 docs/walkthrough.md 阶段 10 的说明），
+#   所以这一步按那里记的办法，在 .ioc 里补一行（`: ` 要写成 `\:`）：
+#
+#     NVIC.EXTI9_5_IRQn=true\:4\:0\:false\:false\:true\:true\:true\:true
+#
+#   优先级取 **4**：串口 2 > FG 捕获 3 > 红外 4 > SysTick 15。
+#   红外排最后是有意的——丢一个沿只是少一帧，下一帧（按住不放时每 ~110 ms
+#   一帧）就能补上，而串口的接收寄存器只有 1 字节深、FG 少一个沿会让这一拍
+#   的转速读数失效。
+#
+#   补完再 regenerate，然后去生成物里核对三处（缺一处就是没生效）：
+#     main.c         HAL_NVIC_SetPriority(EXTI9_5_IRQn, 4, 0) / HAL_NVIC_EnableIRQ(...)
+#     stm32f4xx_it.c void EXTI9_5_IRQHandler(void) { HAL_GPIO_EXTI_IRQHandler(IR_RX_Pin); }
+#     stm32f4xx_it.h void EXTI9_5_IRQHandler(void);
+#   三处齐了，bsp_ir.c 里只需实现 HAL_GPIO_EXTI_Callback()，不必改生成文件。
+#
+# ── 电气 ─────────────────────────────────────────────────────────────
+#   VS1838B 是「解调式」接收头：内部完成 38 kHz 解调、放大与整形，
+#   OUT 是**空闲高、收到载波时拉低**的数字输出（不是原始红外波形）。
+#   引脚顺序（镜头朝自己，左→右）：OUT / GND / VCC。
+#   VCC 取 2.7~5.5V，本板接 3.3V（与 MCU 同电平，不需要电平转换）。
+#   OUT 是集电极开路/CMOS 输出，需要上拉——模块多半板载了一只
+#   （常见 10 kΩ）；没有的话用下面这个内部上拉顶一阵，
+#   信号质量要求高时在 PC7 与 3V3 之间再补一只 10 kΩ。
+# =====================================================================
+
+set pin PC7 GPIO_EXTI7
+set gpio parameters "PC7" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PC7" "GPIO_Label" "IR_RX"
+set gpio parameters "PC7" "GPIO_ModeDefaultEXTI" "GPIO_MODE_IT_RISING_FALLING"

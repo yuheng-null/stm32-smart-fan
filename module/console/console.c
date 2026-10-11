@@ -25,6 +25,7 @@
 #define CONSOLE_MODE_AUTO   (1)
 #define CONSOLE_MODE_MANUAL (2)
 
+
 /* ------------------------------------------------------------ 词法工具 */
 
 static bool is_digit(char c)
@@ -303,6 +304,39 @@ static error_t console_finish_line(console_parser_t *parser, console_command_t *
         return ERR_OK;
     }
 
+    /* ---- IR [LEARN <0|1>] ---- */
+    if (strcmp(out->verb, "IR") == 0) {
+        uint8_t     sub_len = 0U;
+        const char *sub     = token_next(&cursor, &sub_len);
+
+        /* 不带参数 = 看状态。 */
+        if (sub_len == 0U) {
+            out->arg_i[0] = CONSOLE_IR_STATUS;
+            out->arg_count = 0U;
+            out->id        = CONSOLE_CMD_IR;
+            return ERR_OK;
+        }
+
+        if (token_equals(sub, sub_len, "LEARN")) {
+            uint8_t     arg_len = 0U;
+            const char *arg     = token_next(&cursor, &arg_len);
+            int32_t     on      = 0;
+
+            if (!parse_int32(arg, arg_len, &on) || ((on != 0) && (on != 1))) {
+                out->id = CONSOLE_CMD_UNKNOWN;
+                return ERR_INVALID_PARAM;
+            }
+
+            out->arg_i[0]  = (on == 1) ? CONSOLE_IR_LEARN_ON : CONSOLE_IR_LEARN_OFF;
+            out->arg_count = 1U;
+            out->id        = CONSOLE_CMD_IR;
+            return ERR_OK;
+        }
+
+        out->id = CONSOLE_CMD_UNKNOWN;
+        return ERR_INVALID_PARAM;
+    }
+
     /* ---- MODE OFF|AUTO|MANUAL ---- */
     if (strcmp(out->verb, "MODE") == 0) {
         uint8_t     arg_len = 0U;
@@ -445,6 +479,8 @@ const char *console_help_text(void)
         "  PID <kp> <ki>     在线整定内环\r\n"
         "  STREAM <0|1>      0=人类可读行，1=CSV 遥测帧\r\n"
         "  RESET          清报警并回到 AUTO\r\n"
+        "  IR             遥控接收状态（帧数/拒帧原因/丢沿）\r\n"
+        "  IR LEARN <0|1> 1=学习模式：只回显收到的遥控码，不执行动作\r\n"
         "按键：K1 短按调高目标/加档，K2 短按调低/减档；\r\n"
         "      K1 长按循环 AUTO→MANUAL→OFF；K2 长按静音（FAULT 下为复位）。\r\n"
         "\r\n";

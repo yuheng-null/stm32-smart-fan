@@ -47,6 +47,58 @@ static void parse_string(console_parser_t *parser, const char *text, parsed_t *o
     }
 }
 
+/* ------------------------------------------------------------------ IR */
+
+/** `IR` 不带参数 = 看状态；带 LEARN 0|1 = 开关学习模式。 */
+static void test_ir_status_and_learn(void)
+{
+    console_parser_t parser = {0};
+    parsed_t         got;
+
+    parse_string(&parser, "IR\r\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(ERR_OK, got.results[0]);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_CMD_IR, got.cmds[0].id);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_IR_STATUS, got.cmds[0].arg_i[0]);
+
+    parse_string(&parser, "IR LEARN 1\r\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(ERR_OK, got.results[0]);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_CMD_IR, got.cmds[0].id);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_IR_LEARN_ON, got.cmds[0].arg_i[0]);
+
+    parse_string(&parser, "IR LEARN 0\r\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_CMD_IR, got.cmds[0].id);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_IR_LEARN_OFF, got.cmds[0].arg_i[0]);
+
+    /* 大小写不敏感，与前缀一致 */
+    parse_string(&parser, "ir learn 1\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_IR_LEARN_ON, got.cmds[0].arg_i[0]);
+}
+
+static void test_ir_rejects_bad_arguments(void)
+{
+    console_parser_t parser = {0};
+    parsed_t         got;
+
+    /* 学习模式只有 0/1 两档，别的既不是「非法参数」也不是「静默接受」 */
+    parse_string(&parser, "IR LEARN 2\r\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(ERR_INVALID_PARAM, got.results[0]);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_CMD_UNKNOWN, got.cmds[0].id);
+
+    parse_string(&parser, "IR LEARN\r\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(ERR_INVALID_PARAM, got.results[0]);
+
+    parse_string(&parser, "IR BOGUS\r\n", &got);
+    TEST_ASSERT_EQUAL_UINT8(1U, got.count);
+    TEST_ASSERT_EQUAL_INT(ERR_INVALID_PARAM, got.results[0]);
+    TEST_ASSERT_EQUAL_INT(CONSOLE_CMD_UNKNOWN, got.cmds[0].id);
+}
+
 /* ------------------------------------------------------------ 基本命令 */
 
 static void test_help_and_status(void)
@@ -304,6 +356,9 @@ int main(void)
     RUN_TEST(test_overlong_line_is_rejected_without_overrun);
     RUN_TEST(test_extra_whitespace_is_tolerated);
     RUN_TEST(test_reset_clears_partial_line);
+    RUN_TEST(test_ir_status_and_learn);
+    RUN_TEST(test_ir_rejects_bad_arguments);
+
     RUN_TEST(test_help_text_is_not_empty);
 
     return UNITY_END();

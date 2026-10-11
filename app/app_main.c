@@ -13,8 +13,10 @@
  *   判到期用**无符号减法**，于是 tick 回绕（约 49.7 天一次）时仍然正确。
  *
  * ── 任务顺序：先关键、后耗时 ─────────────────────────────────────────
- *   控制 → 遥测 → 显示。把最耗时的 OLED 放最后，它的阻塞只会挤占空闲时间，
- *   不会挤掉同一次循环里的控制与遥测。
+ *   控制 → 遥控 → 遥测 → 显示。遥控排在控制之后：它解出来的是**命令**，
+ *   跟着控制拍走，改完状态马上就能被遥测与显示看见。
+ *   把最耗时的 OLED 放最后，它的阻塞只会挤占空闲时间，不会挤掉同一次
+ *   循环里的控制与遥测。
  * ────────────────────────────────────────────────────────────────────
  */
 
@@ -28,6 +30,7 @@
 #include "app/app_console.h"
 #include "app/app_control.h"
 #include "app/app_display.h"
+#include "app/app_ir.h"
 
 #include "bsp/bsp_adc.h"
 #include "bsp/bsp_buzzer.h"
@@ -70,6 +73,7 @@ typedef struct {
  */
 static app_task_t s_tasks[] = {
     { APP_TASK_CONTROL_MS, 0U, app_control_task },
+    { APP_TASK_CONTROL_MS, 0U, app_ir_task },
     { APP_TASK_SLOW_MS,    0U, app_console_task },
     { APP_TASK_SLOW_MS,    0U, app_display_task },
 };
@@ -143,10 +147,13 @@ static error_t app_send_banner(void)
         "外设: OLED(SSD1306, 软 I2C PB6/PB7) + NTC(PA0/ADC1_IN0) + 按键(PC0/PC1)\r\n"
         "      + 风扇 PWM(PA8/TIM1_CH1, 25kHz, 开漏) + 风扇测速(PA1/TIM2_CH2)\r\n"
         "      + 继电器报警灯(PB0, 高电平触发) + 有源蜂鸣器(PB1, 低电平触发)\r\n"
+        "      + 红外遥控(VS1838B → PC7/EXTI7, NEC；按键即遥控器)\r\n"
         "⚠️ 风扇 12V 必须在板子跑起来之后再给：PWM 悬空 = 内部上拉 = 全速。\r\n"
         "⚠️ 风扇 0% 时仍维持约 295 rpm（4 线规范 <20% 行为未定义），不是真停。\r\n"
         "⚠️ NTC 按标称参数换算（10k / B3950）；要绝对刻度就做两点校准。\r\n"
         "输入 ? 看串口命令表。K1/K2 短按调参，K1 长按切模式，K2 长按静音。\r\n"
+        "遥控器：CH-/CH/CH+ 切 OFF/AUTO/MANUAL，|<< 与 >>| 调低/调高，>|| 复位。\r\n"
+        "        换了遥控器就 IR LEARN 1，按下想用的键，串口会打出它的码。\r\n"
         "\r\n";
 
     char    line[APP_LINE_SIZE];
@@ -168,6 +175,29 @@ static error_t app_send_banner(void)
     }
 
     return app_console_send(tail, (uint32_t)(sizeof(tail) - 1U));
+}
+
+/**
+ * @brief 报一次遥控接收的就绪情况。
+ *
+ * 它按不了「能不能收到」——那要按一下遥控器才知道。这里只回答「接收链路
+ * 起没起来」：起了就说明 EXTI 与 µs 时基都配好了，之后收不到就该查接线
+ * 与供电，而不是怀疑代码。
+ */
+static void app_report_ir(void)
+{
+    static const char ok_msg[] =
+        "IR: OK（VS1838B → PC7/EXTI7）——按遥控器试试，或用 IR LEARN 1 学码\r\n";
+    static const char bad_msg[] =
+        "IR: 未就绪——µs 时基没起来（bsp_fan_init 必须先成功）\r\n";
+
+    app_ir_status_t status;
+
+    if (app_ir_get_status(&status)) {
+        app_send_literal(ok_msg, sizeof(ok_msg) - 1U);
+    } else {
+        app_send_literal(bad_msg, sizeof(bad_msg) - 1U);
+    }
 }
 
 /** @brief 报一次屏幕探测结果。 */
@@ -236,6 +266,16 @@ error_t app_main_init(void)
         return err;
     }
 
+    /*
+     * 红外必须在风扇之后：边沿时刻取自 TIM2 的计数器，而那个计数器是在
+     * bsp_fan_init() 里启动的（见 bsp_time.h 的说明）。
+     *
+     * 与屏幕一样**不算致命**：遥控器收不到时，按键、串口、温控全都照常，
+     * 风扇不会因为一个附属外设而停摆。失败在开机时报到串口上，
+     * 之后用 `IR` 命令也能查到。
+     */
+    (void)app_ir_init();
+
     err = bsp_i2c_init();
     if (err != ERR_OK) {
         return err;
@@ -278,6 +318,7 @@ void app_main_run(void)
         if (!banner_done) {
             (void)app_send_banner();
             app_report_oled();
+            app_report_ir();
 
             const uint32_t now = bsp_system_get_tick_ms();
 

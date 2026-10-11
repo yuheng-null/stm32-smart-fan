@@ -77,6 +77,9 @@ extern TIM_HandleTypeDef  htim2;   /* 风扇测速（TIM2_CH2 ← PA1） */
 #define RELAY_IN_GPIO_Port GPIOB
 #define BUZZER_IO_Pin GPIO_PIN_1
 #define BUZZER_IO_GPIO_Port GPIOB
+#define IR_RX_Pin GPIO_PIN_7
+#define IR_RX_GPIO_Port GPIOC
+#define IR_RX_EXTI_IRQn EXTI9_5_IRQn
 #define FAN_PWM_Pin GPIO_PIN_8
 #define FAN_PWM_GPIO_Port GPIOA
 #define OLED_SCL_Pin GPIO_PIN_6

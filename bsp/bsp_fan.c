@@ -10,6 +10,8 @@
 
 #include "main.h"                   /* 借它引入 HAL 头与 htim1 / htim2 / 引脚宏 */
 
+#include "bsp/bsp_time.h"           /* TIM2 的计数频率（它同时是全系统的 µs 时基） */
+
 /*
  * ── 引脚与外设参数都在 CubeMX 里，不在本文件 ─────────────────────────
  *
@@ -99,33 +101,10 @@ static uint32_t fan_duty_to_compare(uint8_t percent, uint32_t period_counts)
     return ((uint32_t)percent * period_counts) / (uint32_t)BSP_FAN_DUTY_MAX_PERCENT;
 }
 
-/**
- * @brief 算 TIM2 的计数频率（Hz）。
- *
- * ⚠️ 定时器时钟**不等于** PCLK：APB 预分频 = 1 时等于 PCLKx，
- *    预分频 > 1 时是 **2 × PCLKx**（这是 STM32 时钟树里的一个例外，
- *    不查手册很容易把 TIM2 当成 42 MHz 而算错一倍）。
- *
- * 之所以运行期算而不是写死 1 MHz：写死的常数在 .ioc 改了 PSC 之后
- * 不会报任何错，只会让转速整体偏掉。算出来则永远自洽。
- */
-static uint32_t bsp_fan_tim2_clock_hz(void)
-{
-    const uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
-
-    /* RM0090 时钟树：PPRE1 = 1 时定时器时钟 = PCLK1，否则 = 2 × PCLK1 */
-    return ((RCC->CFGR & RCC_CFGR_PPRE1) == RCC_CFGR_PPRE1_DIV1)
-               ? pclk1
-               : (pclk1 * 2U);
-}
-
 /* ----------------------------------------------------------------- 对外 */
 
 error_t bsp_fan_init(void)
 {
-    uint32_t tim2_clk;
-    uint32_t psc;
-
     s_ready          = false;
     s_have_period    = false;
     s_have_capture   = false;
@@ -149,16 +128,12 @@ error_t bsp_fan_init(void)
 
     /* ---- 测速侧 ---- */
     /*
-     * 取 PSC 用句柄里的 Init.Prescaler：HAL 在 HAL_TIM_IC_Init() 里把它
-     * 写进 TIM2->PSC，两者恒等。
-     * （HAL 只提供了 __HAL_TIM_SET_PRESCALER，没有对应的 GET —— 别照着
-     *   SET 的名字去猜一个 GET，那是编译期就报错的那种好运气。）
+     * TIM2 的计数频率由 bsp_time 算：那个模块把同一个计数器当作全系统的
+     * 微秒时基，两边共用一处换算，改 .ioc 的 PSC 时不会只有一边跟着变。
+     * 它读 PSC 读的是 htim2.Init.Prescaler（HAL 在 HAL_TIM_IC_Init() 里
+     * 把它写进 TIM2->PSC，两者恒等），所以 .ioc 改了也自洽。
      */
-    psc      = (uint32_t)htim2.Init.Prescaler;
-    tim2_clk = bsp_fan_tim2_clock_hz();
-
-    /* 计数频率 = 定时器时钟 / (PSC+1)。PSC 读自寄存器，.ioc 改了也自洽。 */
-    s_tick_hz = tim2_clk / (psc + 1U);
+    s_tick_hz = bsp_time_counter_hz();
     if (s_tick_hz == 0U) {
         (void)HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
         return ERR_NOT_READY;

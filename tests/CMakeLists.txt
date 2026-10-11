@@ -40,6 +40,7 @@ set(SMART_FAN_MODULE_SOURCES
     "${SMART_FAN_ROOT}/module/console/console.c"
     "${SMART_FAN_ROOT}/module/telemetry/telemetry.c"
     "${SMART_FAN_ROOT}/module/display_view/display_view.c"
+    "${SMART_FAN_ROOT}/module/ir_remote/ir_remote.c"
 )
 
 add_library(smart_fan_module STATIC ${SMART_FAN_MODULE_SOURCES})
@@ -86,3 +87,4 @@ smart_fan_add_test(test_fan_fsm)
 smart_fan_add_test(test_console)
 smart_fan_add_test(test_telemetry)
 smart_fan_add_test(test_display_view)
+smart_fan_add_test(test_ir_remote)

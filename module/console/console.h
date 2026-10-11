@@ -35,6 +35,18 @@
 #define CONSOLE_VERB_MAX (8U)
 
 /** 解析出的命令。 */
+/**
+ * IR 命令的子动作，编码在 console_command_t::arg_i[0]。
+ *
+ * 放在头文件而不是藏在 .c 里：app 那一层要照着它分发，两边写各自的字面量
+ * 迟早会漂移（`MODE` 的 0/1/2 就是现成的例子，已在 app_console.c 里重写了一遍）。
+ */
+typedef enum {
+    CONSOLE_IR_STATUS    = 0,   /**< IR：打印遥控接收状态 */
+    CONSOLE_IR_LEARN_OFF = 1,   /**< IR LEARN 0：关学习模式 */
+    CONSOLE_IR_LEARN_ON  = 2,   /**< IR LEARN 1：开学习模式 */
+} console_ir_action_t;
+
 typedef enum {
     CONSOLE_CMD_NONE = 0,
     CONSOLE_CMD_HELP,      /**< ? */
@@ -45,6 +57,7 @@ typedef enum {
     CONSOLE_CMD_PID,       /**< PID <kp> <ki>，两参数进 arg_f */
     CONSOLE_CMD_STREAM,    /**< STREAM <0|1>：0=人类可读行，1=CSV 遥测帧 */
     CONSOLE_CMD_RESET,     /**< RESET */
+    CONSOLE_CMD_IR,        /**< IR、IR LEARN <0|1>；子动作编码在 arg_i[0] */
     CONSOLE_CMD_UNKNOWN,   /**< 认不出来或参数非法 */
 } console_cmd_id_t;
 
