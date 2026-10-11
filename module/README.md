@@ -5,9 +5,27 @@
 ```
 module/
 ├── temperature/    温度采样与滤波（已实现：NTC 分压 → Beta 方程 → 毫摄氏度）
-├── fan_control/    风扇调速策略（开关控制 / PID）—— 计划中
+├── fan_control/    风扇转速换算与档位策略（已实现；PID 待做）
 └── telemetry/      对外上报的运行数据组装 —— 计划中
 ```
+
+## 当前实现：`fan_control/`
+
+```c
+error_t fan_control_rpm_from_period_us(uint32_t period_us, uint32_t *rpm);
+uint8_t fan_control_duty_step(uint8_t duty, fan_duty_dir_t dir);
+```
+
+和 `temperature/` 一样是**纯计算**：输入是「FG 相邻两沿之间数了多少个 1 µs 计数」
+和「当前占空比」，输出是转速和下一档占空比。不需要板子、不需要风扇就能单测。
+
+⚠️ 转速换算依赖两个假设：**每转 2 个脉冲**（Intel 规范值）和**每个边沿只被捕获
+一次**。实测线性度很好，但绝对值尚未与风扇铭牌对过；若差固定倍数，改
+`FAN_CONTROL_PULSES_PER_REV`，或去查 FG 边沿是不是有振铃被重复捕获。
+
+> 这里**没有**「占空比百分比 → 定时器比较值」那段换算：那是硬件映射，
+> 留在 `bsp/bsp_fan.c` 里。原因是分层——`BSP → MODULE` 是反向依赖，
+> 两边互不认识，硬要共用会让 `bsp/` 挂上业务层的东西。
 
 ## 当前实现：`temperature/`
 

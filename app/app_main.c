@@ -14,9 +14,12 @@
 #include <stdio.h>
 
 #include "bsp/bsp_adc.h"
+#include "bsp/bsp_buzzer.h"
+#include "bsp/bsp_fan.h"
 #include "bsp/bsp_i2c.h"
 #include "bsp/bsp_key.h"
 #include "bsp/bsp_oled.h"
+#include "bsp/bsp_relay.h"
 #include "bsp/bsp_system.h"
 #include "bsp/bsp_uart.h"
 
@@ -26,6 +29,7 @@
 #include "interface/error.h"
 #include "interface/uart_if.h"
 
+#include "module/fan_control/fan_control.h"
 #include "module/temperature/temperature.h"
 
 /* ----------------------------------------------------------------- 配置 */
@@ -39,8 +43,14 @@
 /** 单次发送的阻塞上限。115200 下发几十字节只需几百微秒，200 ms 很宽松。 */
 #define APP_TX_TIMEOUT_MS       (200U)
 
-/** 一行文本的缓冲。最长的是状态行，约 110 字节，留足余量。 */
-#define APP_LINE_BUFFER_SIZE    (160U)
+/**
+ * 一行文本的缓冲。
+ *
+ * 最长的是状态行：温度那段约 110 字节，加上风扇/继电器/蜂鸣器那段约 70 字节，
+ * 留到 256 有充分余量。**改状态行格式时记得回来核对这里**——
+ * snprintf 截断是静默的，只会把行尾悄悄吃掉。
+ */
+#define APP_LINE_BUFFER_SIZE    (256U)
 
 /** 一次从接收缓冲取走的字节数上限。 */
 #define APP_RX_CHUNK_SIZE       (64U)
@@ -152,6 +162,190 @@ static void app_format_kohm(uint32_t r_ohm, char *buf, size_t cap)
                    (unsigned long)((r_ohm % 1000U) / 10U));
 }
 
+/* ------------------------------------------------- 风扇 / 继电器 / 蜂鸣器 */
+
+/**
+ * @brief 取当前风扇转速。
+ *
+ * @param status 输出，转速换算的返回码（调试用，能区分「没信号」「太慢」
+ *               「还没凑够两个沿」——转速一律为 0，成因却不同）。
+ *
+ * @return uint32_t 转速（转/分）；取不到时为 0。
+ */
+static uint32_t app_fan_rpm(error_t *status)
+{
+    uint32_t period_us = 0U;
+    uint32_t rpm       = 0U;
+    error_t  err       = bsp_fan_get_period_us(&period_us);
+
+    if (err == ERR_OK) {
+        err = fan_control_rpm_from_period_us(period_us, &rpm);
+    }
+
+    if (err != ERR_OK) {
+        rpm = 0U;       /* 没信号 / 太慢 / 算不出，一律按 0 报，成因看 status */
+    }
+
+    if (status != NULL) {
+        *status = err;
+    }
+
+    return rpm;
+}
+
+/**
+ * @brief 把风扇、继电器、蜂鸣器的当前状态打一行到串口。
+ *
+ * 三个模块都印在同一行，是为了让「按一下键 → 这一行立刻变」这件事
+ * 一眼可见；分散在多行反而要在滚动里找。
+ */
+static void app_report_devices(void)
+{
+    char          line[APP_LINE_BUFFER_SIZE];
+    error_t       rpm_status = ERR_NOT_INITIALIZED;
+    const uint32_t rpm       = app_fan_rpm(&rpm_status);
+
+    const int len = snprintf(
+        line, sizeof(line),
+        "FAN: duty = %u%%  rpm = %lu  fg = %lu  rpm_status = %d"
+        "  | RELAY = %s  | BUZZER = %s\r\n",
+        (unsigned)bsp_fan_get_duty_percent(),
+        (unsigned long)rpm,
+        (unsigned long)bsp_fan_get_capture_count(),
+        (int)rpm_status,
+        bsp_relay_is_on() ? "ON" : "OFF",
+        bsp_buzzer_is_on() ? "ON" : "OFF");
+
+    (void)app_send_formatted(line, len, sizeof(line));
+}
+
+/**
+ * @brief 占空比加/减一档，并立刻上报。
+ *
+ * 夹取与步进规则在 module/fan_control 里（纯计算，可单测），
+ * 这里只负责「取当前值 → 算下一档 → 写硬件 → 报出来」。
+ */
+static void app_fan_step_duty(fan_duty_dir_t dir)
+{
+    static const char set_failed[] = "FAN: 设置占空比失败\r\n";
+
+    const uint8_t next = fan_control_duty_step(bsp_fan_get_duty_percent(), dir);
+
+    if (bsp_fan_set_duty_percent(next) != ERR_OK) {
+        (void)app_send_literal(set_failed, sizeof(set_failed) - 1U);
+        return;
+    }
+
+    app_report_devices();
+}
+
+/**
+ * @brief 诊断：绕过定时器强制拉低某根引脚，并说明该怎么读结果。
+ *
+ * 见 bsp_fan.h 里 bsp_fan_force_pin_low() 的完整说明。
+ */
+static void app_fan_force(bsp_fan_force_t which)
+{
+    static const char note_pwm[] =
+        "诊断: 已把 PA8（PWM 脚）强制拉低，绕过定时器。\r\n"
+        "  风扇停 -> PA8 确实就是 PWM 线，问题在固件侧；\r\n"
+        "  风扇照转 -> PA8 不是 PWM 线，试试 1（拉低 PA1）。\r\n";
+    static const char note_tach[] =
+        "诊断: 已把 PA1（测速脚）强制拉低，绕过定时器。\r\n"
+        "  风扇停 -> PA1 上挂的才是 PWM 线 —— 两根信号线接反了。\r\n";
+    static const char note_both[] =
+        "诊断: 已把 PA8 与 PA1 都强制拉低。\r\n";
+    static const char note_tail[] = "  复位板子即可恢复正常控制。\r\n";
+
+    bsp_fan_force_pin_low(which);
+
+    if (which == BSP_FAN_FORCE_PWM) {
+        (void)app_send_literal(note_pwm, sizeof(note_pwm) - 1U);
+    } else if (which == BSP_FAN_FORCE_TACH) {
+        (void)app_send_literal(note_tach, sizeof(note_tach) - 1U);
+    } else {
+        (void)app_send_literal(note_both, sizeof(note_both) - 1U);
+    }
+
+    (void)app_send_literal(note_tail, sizeof(note_tail) - 1U);
+    app_report_devices();
+}
+
+/** 串口命令表。用字面量发送，不占 RAM、也不会被 snprintf 截断。 */
+static const char APP_HELP[] =
+    "\r\n命令（单字符，大小写均可）:\r\n"
+    "  + / -   风扇占空比 +10% / -10%\r\n"
+    "  r       继电器吸合/断开（切换）\r\n"
+    "  b       蜂鸣器响/停（切换）\r\n"
+    "  t       立刻打印一行风扇/继电器/蜂鸣器状态\r\n"
+    "  p       诊断：绕过定时器，把 PA8/PA1 都强制拉低（复位板子恢复）\r\n"
+    "  8       诊断：只强制拉低 PA8   1：只强制拉低 PA1\r\n"
+    "  ?       显示本表\r\n"
+    "另外：K1 加档、K2 减档（与 + / - 等效）。\r\n\r\n";
+
+/**
+ * @brief 处理串口收到的一批字节里的单字符命令。
+ *
+ * 为什么继电器和蜂鸣器走串口而不是再加按键：板上只有两个键，已经给了
+ * 占空比加减；这两个器件需要能立刻手动触发，串口是现成的手段，
+ * 而且比按键更容易确认「到底有没有执行」——命令本身就带着回显。
+ *
+ * 不认识的字符一律忽略：回显已经在主循环里做了，这里再报一次只会刷屏。
+ */
+static void app_handle_commands(const uint8_t *buf, uint32_t len)
+{
+    for (uint32_t i = 0U; i < len; i++) {
+        switch ((char)buf[i]) {
+        case '+':
+            app_fan_step_duty(FAN_DUTY_UP);
+            break;
+
+        case '-':
+            app_fan_step_duty(FAN_DUTY_DOWN);
+            break;
+
+        case 'r':
+        case 'R':
+            (void)bsp_relay_set(!bsp_relay_is_on());
+            app_report_devices();
+            break;
+
+        case 'b':
+        case 'B':
+            (void)bsp_buzzer_set(!bsp_buzzer_is_on());
+            app_report_devices();
+            break;
+
+        case 't':
+        case 'T':
+            app_report_devices();
+            break;
+
+        case '8':
+            /* 诊断：只把 PA8 强制拉低（详见 bsp_fan.h）。执行后要复位才能恢复。 */
+            app_fan_force(BSP_FAN_FORCE_PWM);
+            break;
+
+        case '1':
+            /* 诊断：只把 PA1 强制拉低 */
+            app_fan_force(BSP_FAN_FORCE_TACH);
+            break;
+
+        case 'p':
+        case 'P':
+            app_fan_force(BSP_FAN_FORCE_BOTH);
+            break;
+
+        case '?':
+            (void)app_send_literal(APP_HELP, sizeof(APP_HELP) - 1U);
+            break;
+
+        default:
+            break;
+        }
+    }
+}
+
 /* ----------------------------------------------------------- 开机自检 */
 
 /**
@@ -191,8 +385,12 @@ static error_t app_send_banner(void)
 
     static const char banner_tail[] =
         "外设: OLED(SSD1306, 软 I2C PB6/PB7) + NTC(PA0/ADC1_IN0) + 按键(PC0/PC1)\r\n"
+        "      + 风扇 PWM(PA8/TIM1_CH1, 25kHz, 开漏) + 风扇测速(PA1/TIM2_CH2)\r\n"
+        "      + 继电器(PB0, 高电平触发) + 有源蜂鸣器(PB1, 低电平触发)\r\n"
         "上面这几行在串口助手里不是乱码，就说明时钟树与波特率都对。\r\n"
         "温度是对 NTC 分压做的换算，参数尚未校准，只看趋势不看绝对值。\r\n"
+        "⚠️ 风扇必须在板子跑起来之后再给 12V：PWM 悬空 = 风扇内部上拉 = 全速。\r\n"
+        "输入 ? 看串口命令表；K1 加档、K2 减档。\r\n"
         "\r\n";
 
     char    line[APP_LINE_BUFFER_SIZE];
@@ -229,7 +427,11 @@ static error_t app_send_banner(void)
 static void app_oled_refresh(const char *temp_text, const char *r_text,
                              uint16_t raw, bool temp_ok)
 {
-    char line[APP_LINE_BUFFER_SIZE];
+    char          line[APP_LINE_BUFFER_SIZE];
+    error_t       rpm_status = ERR_NOT_INITIALIZED;
+    const uint32_t rpm       = app_fan_rpm(&rpm_status);
+
+    (void)rpm_status;   /* 屏幕上不显示原因码，串口那一行有 */
 
     if (!s_oled_ok) {
         return;
@@ -244,23 +446,29 @@ static void app_oled_refresh(const char *temp_text, const char *r_text,
     (void)ssd1306_set_cursor(&s_oled, 96U, 4U);
     (void)ssd1306_write_string(&s_oled, "C", &Font_11x18, SSD1306_WHITE);
 
-    /* 第二、三行：中间量，排障时对得上号 */
+    /*
+     * 下面三行用 6x8 字库，不是 7x10。
+     *
+     * 一屏 128 像素：6 像素一个字 → 每行 21 个字符，7 像素一个字 → 只有 18。
+     * 「duty 100%   rpm 30000」这种最坏情况正好 21 个字符，用 7x10 会被挤到
+     * 屏幕外——而 write_string 越界**不报错**，只是画到看不见的地方，
+     * 事后很难想到是字号的问题。
+     */
     (void)ssd1306_set_cursor(&s_oled, 0U, 22U);
-    (void)snprintf(line, sizeof(line), "raw %u", (unsigned)raw);
-    (void)ssd1306_write_string(&s_oled, line, &Font_7x10, SSD1306_WHITE);
+    (void)snprintf(line, sizeof(line), "duty %u%%   rpm %lu",
+                   (unsigned)bsp_fan_get_duty_percent(), (unsigned long)rpm);
+    (void)ssd1306_write_string(&s_oled, line, &Font_6x8, SSD1306_WHITE);
 
+    /* 中间量：排障时和串口那一行对得上号（k 即 kΩ） */
     (void)ssd1306_set_cursor(&s_oled, 0U, 34U);
-    (void)snprintf(line, sizeof(line), "R %s kohm", r_text);
-    (void)ssd1306_write_string(&s_oled, line, &Font_7x10, SSD1306_WHITE);
+    (void)snprintf(line, sizeof(line), "raw %u  R %sk", (unsigned)raw, r_text);
+    (void)ssd1306_write_string(&s_oled, line, &Font_6x8, SSD1306_WHITE);
 
-    /* 第四行：两个按键的当前状态与累计按下次数 */
     (void)ssd1306_set_cursor(&s_oled, 0U, 46U);
-    (void)snprintf(line, sizeof(line), "K1%c n=%lu   K2%c n=%lu",
-                   bsp_key_is_pressed(KEY_ID_K1) ? '*' : '-',
-                   (unsigned long)s_key_press_count[KEY_ID_K1],
-                   bsp_key_is_pressed(KEY_ID_K2) ? '*' : '-',
-                   (unsigned long)s_key_press_count[KEY_ID_K2]);
-    (void)ssd1306_write_string(&s_oled, line, &Font_7x10, SSD1306_WHITE);
+    (void)snprintf(line, sizeof(line), "RL %s  BZ %s",
+                   bsp_relay_is_on() ? "ON" : "OFF",
+                   bsp_buzzer_is_on() ? "ON" : "OFF");
+    (void)ssd1306_write_string(&s_oled, line, &Font_6x8, SSD1306_WHITE);
 
     (void)ssd1306_update_screen(&s_oled);
 }
@@ -271,12 +479,16 @@ static void app_oled_refresh(const char *temp_text, const char *r_text,
 static void app_report_status(const char *temp_text, const char *r_text,
                               uint16_t raw, bool temp_ok, error_t temp_status)
 {
-    char line[APP_LINE_BUFFER_SIZE];
+    char          line[APP_LINE_BUFFER_SIZE];
+    error_t       rpm_status = ERR_NOT_INITIALIZED;
+    const uint32_t rpm       = app_fan_rpm(&rpm_status);
 
     const int len = snprintf(
         line, sizeof(line),
-        "[%5lu ms] T = %s C  raw = %4u  R = %s kohm  K1 = %lu(%c)  K2 = %lu(%c)  "
-        "drop = %lu  err = %lu  status = %d\r\n",
+        "[%5lu ms] T = %s C  raw = %4u  R = %s kohm  K1 = %lu(%c)  K2 = %lu(%c)"
+        "  | fan duty = %u%%  rpm = %lu  fg = %lu  rpm_status = %d"
+        "  | relay = %s  buzz = %s"
+        "  | drop = %lu  err = %lu  status = %d\r\n",
         (unsigned long)bsp_system_get_tick_ms(),
         temp_ok ? temp_text : APP_NO_VALUE,
         (unsigned)raw,
@@ -285,6 +497,12 @@ static void app_report_status(const char *temp_text, const char *r_text,
         bsp_key_is_pressed(KEY_ID_K1) ? '*' : '-',
         (unsigned long)s_key_press_count[KEY_ID_K2],
         bsp_key_is_pressed(KEY_ID_K2) ? '*' : '-',
+        (unsigned)bsp_fan_get_duty_percent(),
+        (unsigned long)rpm,
+        (unsigned long)bsp_fan_get_capture_count(),
+        (int)rpm_status,
+        bsp_relay_is_on() ? "ON" : "OFF",
+        bsp_buzzer_is_on() ? "ON" : "OFF",
         (unsigned long)bsp_uart_get_rx_drop_count(),
         (unsigned long)bsp_uart_get_rx_error_count(),
         (int)temp_status);
@@ -325,7 +543,33 @@ error_t app_main_init(void)
     }
 
     /*
-     * OLED 失败不算致命：屏没接好时，温度与按键的测试照样能做，
+     * 继电器与蜂鸣器只是登记状态（引脚由 MX_GPIO_Init() 配好且已有初值），
+     * 不会失败；写返回值判断是为了将来有人给它们加真硬件动作时不必回头补。
+     */
+    ret = bsp_relay_init();
+    if (ret != ERR_OK) {
+        return ret;
+    }
+
+    ret = bsp_buzzer_init();
+    if (ret != ERR_OK) {
+        return ret;
+    }
+
+    /*
+     * 风扇：启动 25 kHz PWM（占空比 0，先停住）与 FG 捕获中断。
+     *
+     * ⚠️ 这一步**不依赖风扇已接线**——它只是让引脚开始输出、让定时器开始计数。
+     *    真正的上电顺序是「板子先跑起来，再给风扇 12V」；反过来先给电，
+     *    PWM 引脚还是浮空输入状态，风扇看到的悬空 = 内部上拉 = 全速。
+     */
+    ret = bsp_fan_init();
+    if (ret != ERR_OK) {
+        return ret;
+    }
+
+    /*
+     * OLED 失败不算致命：屏没接好时，温度、按键与风扇的测试照样能做，
      * 故障交给下面开机时的总线扫描报出来，不在这里中止。
      */
     s_oled_ok = (bsp_oled_init(&s_oled) == ERR_OK);
@@ -367,15 +611,25 @@ void app_main_run(void)
 
         /* ---- 按键：事件是边沿，读取即清除 ---- */
         for (uint8_t i = 0U; i < (uint8_t)KEY_ID_COUNT; i++) {
-            if (bsp_key_take_event((key_id_t)i) == KEY_EVENT_PRESS) {
-                s_key_press_count[i]++;
+            if (bsp_key_take_event((key_id_t)i) != KEY_EVENT_PRESS) {
+                continue;
             }
+
+            /* 计数照旧累加——它是「消抖有没有多计/漏计」最直接的证据 */
+            s_key_press_count[i]++;
+
+            /* K1 加档、K2 减档 */
+            app_fan_step_duty((i == (uint8_t)KEY_ID_K1) ? FAN_DUTY_UP : FAN_DUTY_DOWN);
         }
 
-        /* ---- 串口回显：一次整块取走，收发时序与主循环解耦 ---- */
+        /* ---- 串口：一次整块取走，收发时序与主循环解耦 ---- */
         const uint32_t got = s_uart->read(s_uart->ctx, rx_chunk, (uint32_t)sizeof(rx_chunk));
         if (got > 0U) {
+            /* 先原样回显：这一条是「RX 链路通不通」最直接的证据 */
             (void)app_write_text((const char *)rx_chunk, got);
+
+            /* 再把里面的单字符命令执行掉（继电器、蜂鸣器的切换走这里） */
+            app_handle_commands(rx_chunk, got);
         }
 
         /* ---- 周期上报 ---- */

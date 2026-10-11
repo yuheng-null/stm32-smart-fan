@@ -152,7 +152,19 @@ python tools/cubemx_apply.py apply . cube-recipes/r2-时钟树.txt
 ## 当前进度
 
 已完成：时钟树（8 MHz HSE → 168 MHz）、SWD 调试口、USART1（PA9/PA10）、
-分层骨架、串口链路验证。
+分层骨架、串口链路验证；三路外设（OLED / NTC / 按键）；
+风扇 PWM 调速 + FG 测速、继电器、有源蜂鸣器。
 
-`app/app_main.c` 目前是串口链路的冒烟验证（开机横幅 + 心跳 + 回显）。
+`app/app_main.c` 目前是**全部外设的测试台**：开机横幅 + 周期状态行 + 串口单字符
+命令（`?` 命令表、`+`/`-` 占空比、`r` 继电器、`b` 蜂鸣器、`t` 状态、`8`/`1`/`p` 引脚诊断）。
 下一步把温控风扇的状态机替换掉 `app_main_run()` 里的循环，业务逻辑放 `module/`。
+
+### 一个分层的实例：为什么「占空比 → CCR」不在 module 里
+
+`fan_control_set_duty_percent()` 收的是百分比，而定时器要的是比较值 CCR。这段换算
+看起来像业务，其实不是：它只在本颗定时器、这个 `ARR` 下才有意义，是**硬件映射**，
+所以留在 `bsp/bsp_fan.c` 里。
+
+放在 `module/` 里技术上也能跑，但那会让 `bsp/` 反向去 `#include "module/..."`，
+而 `BSP → MODULE` 是这张依赖表里明确不允许的方向。同理，`bsp_fan.c` 里宁可
+自己定义一份 `BSP_FAN_DUTY_MAX_PERCENT`，也不去引 `module/fan_control` 的同名宏。

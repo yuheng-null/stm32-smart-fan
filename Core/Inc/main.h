@@ -49,6 +49,8 @@ extern "C" {
 
 /* USER CODE END EM */
 
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
@@ -59,6 +61,8 @@ void Error_Handler(void);
    写在 USER CODE 块内：CubeMX 重新生成时会原样保留。 */
 extern UART_HandleTypeDef huart1;
 extern ADC_HandleTypeDef  hadc1;
+extern TIM_HandleTypeDef  htim1;   /* 风扇 PWM（TIM1_CH1 → PA8） */
+extern TIM_HandleTypeDef  htim2;   /* 风扇测速（TIM2_CH2 ← PA1） */
 
 /* USER CODE END EFP */
 
@@ -67,6 +71,14 @@ extern ADC_HandleTypeDef  hadc1;
 #define KEY1_GPIO_Port GPIOC
 #define KEY2_Pin GPIO_PIN_1
 #define KEY2_GPIO_Port GPIOC
+#define FAN_TACH_Pin GPIO_PIN_1
+#define FAN_TACH_GPIO_Port GPIOA
+#define RELAY_IN_Pin GPIO_PIN_0
+#define RELAY_IN_GPIO_Port GPIOB
+#define BUZZER_IO_Pin GPIO_PIN_1
+#define BUZZER_IO_GPIO_Port GPIOB
+#define FAN_PWM_Pin GPIO_PIN_8
+#define FAN_PWM_GPIO_Port GPIOA
 #define OLED_SCL_Pin GPIO_PIN_6
 #define OLED_SCL_GPIO_Port GPIOB
 #define OLED_SDA_Pin GPIO_PIN_7

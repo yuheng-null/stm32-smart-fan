@@ -1,0 +1,129 @@
+# 第 4 遍配方：风扇 PWM/测速 + 继电器 + 蜂鸣器
+#
+# 用法:
+#   python tools/cubemx_apply.py apply . "cube-recipes/r4-fan-relay-buzzer.txt"
+#
+# 前置：r1 / r2 / r3 已跑完（8 MHz HSE -> 168 MHz，ADC/USART/GPIO 已配好）。
+#       本配方不改时钟树。
+#
+# 所有模式名与键名都不是猜的，出处逐条写在对应段落里。
+
+# =====================================================================
+# 一、风扇 PWM：PA8 = TIM1_CH1，25 kHz，开漏
+# =====================================================================
+# ── 为什么是开漏 ─────────────────────────────────────────────────────
+#   4 线风扇的 PWM 脚是「风扇内部上拉到 3.3V 或 5V、主板开漏拉低」的接口
+#   （Intel 4-Wire PWM 规范）。用开漏驱动，高电平由风扇自己的上拉建立，
+#   不管它上拉到 3.3V 还是 5V 都不会和 MCU 的输出级打架。
+#   佐证：风扇 PWM 悬空时会全速转 —— 这正是「悬空 = 被内部上拉 = 100%」。
+#   PA8 在数据手册 Table 7 里是 I/O FT（5V 耐受），即使上拉到 5.25V 也在范围内。
+#
+# ── 频率 ─────────────────────────────────────────────────────────────
+#   Intel 规范给 21~28 kHz，取标称 25 kHz。
+#   TIM1 挂 APB2，APB2 分频 = 2 → PCLK2 = 84 MHz → 定时器时钟 = 2×84 = 168 MHz。
+#     f = 168e6 / (PSC+1) / (ARR+1) = 168e6 / 1 / 6720 = 25000 Hz
+#   → PSC = 0, ARR = 6719（计数器从 0 数到 ARR 共 6720 个数）。
+#
+# ── 键名出处 ─────────────────────────────────────────────────────────
+#   模式名 "PWM Generation CH1"：`cubemx.py probe . TIM1` 列出的可选项。
+#   通道键 "Channel-PWM Generation1 CH1"：CubeMX 自己 apply 后写进 .ioc 的
+#     原样键名（`SH.S_TIM1_CH1.0=TIM1_CH1,PWM Generation1 CH1` 也一并生成）。
+#   AF 引脚的 GPIO 键是 GPIO_Mode（不是 GPIO 输出脚的 GPIO_ModeDefaultOutputPP），
+#     取值 GPIO_MODE_AF_OD：依据 CubeMX 自带板级模板
+#     db/plugins/boardmanager/boards/C41_Discovery_STM32F401C-DISCO_..._AllConfig.ioc
+#     （PB6/PB9 的 I2C AF 开漏脚就是这套键）。
+# =====================================================================
+
+set mode TIM1 "PWM Generation CH1"
+set pin PA8 TIM1_CH1
+set gpio parameters "PA8" "GPIO_ModeDefaultPP" "GPIO_MODE_AF_OD"
+set gpio parameters "PA8" "GPIO_PuPd" "GPIO_NOPULL"
+set gpio parameters "PA8" "GPIO_Speed" "GPIO_SPEED_FREQ_LOW"
+set gpio parameters "PA8" "GPIO_Label" "FAN_PWM"
+set ip parameters TIM1 Prescaler 0
+set ip parameters TIM1 Period 6719
+
+# =====================================================================
+# 二、风扇测速：PA1 = TIM2_CH2，输入捕获（上升沿，测周期）
+# =====================================================================
+# ── 电气 ─────────────────────────────────────────────────────────────
+#   FG 是开集输出，正常风扇自己**不带**上拉，要靠主板拉。这里用 STM32 的
+#   内部上拉（约 40 kΩ）兜底，不额外接电阻；若读数抖，再在 PA1 与 3V3 之间
+#   加 4.7 kΩ（见 docs/hardware.md）。
+#   ⚠️ 少数风扇的 FG 内部上拉到 5V/12V —— 那种直连会打坏 PA1，必须实测确认。
+#
+# ── 计数方式：为什么不用管溢出 ───────────────────────────────────────
+#   CubeMX 自己的 TIM IP 模型里写着 `<!-- TIM2 and TIM5 are 32bits wide -->`，
+#   且 Period 的 Max = 4294967295。所以 TIM2 是 32 位计数器：
+#   TIM2 挂 APB1（PCLK1 = 42 MHz，APB1 分频 = 4）→ 定时器时钟 = 84 MHz
+#   → PSC = 83 得 1 MHz 计数（1 个计数 = 1 µs）。
+#   32 位 @1 MHz 要 4295 s 才回绕，测转速永远够用，无需溢出中断。
+#
+# ── 转速怎么算 ───────────────────────────────────────────────────────
+#   4 线风扇 FG 为 **2 脉冲/转**（Intel 规范）。相邻两沿间隔 T(µs) 即半个转周期：
+#     RPM = 60 / (T · 2 · 1e-6) = 30e6 / T
+#   例：1000 RPM → T = 30000 µs → 30e6/30000 = 1000 ✓
+#
+# ── ⚠️ 模式名必须用「内部名」，不能用 probe 列出的那个 ─────────────────
+#   实测（2026-10-11，F407 + CubeMX 6.15）：
+#     `set mode TIM2 "Input Capture direct mode"`  → **配到了 CH1**，
+#        还把 PA5 抢走当 TIM2_CH1_ETR（.ioc 里出现 PA5.Signal=S_TIM2_CH1_ETR）。
+#   原因：TIM 的输入捕获在 4 个通道上 **UserName 完全相同**
+#     （IP 定义里都是 "Input Capture direct mode"），`set mode` 只能匹配到
+#     第一个，也就是 CH1。带通道号的 UserName（如 PWM 的 "PWM Generation CH1"）
+#     才没有这个问题。
+#   正解是用 IP 定义文件里的**内部模式名**（带通道号）：
+#     <CubeMX>/db/mcu/IP/TIM1_8-gptimer2_v2_x_Cube_Modes.xml
+#       → Mode Name="Input_Capture2_from_TI2" UserName="Input Capture direct mode"
+#   实测 `set mode TIM2 "Input_Capture2_from_TI2"` 后，.ioc 正确出现
+#     SH.S_TIM2_CH2.0=TIM2_CH2,Input_Capture2_from_TI2
+#     TIM2.Channel-Input_Capture2_from_TI2=TIM_CHANNEL_2
+#   验证方法（不动工程）：把 .ioc 复制到临时目录，对副本跑 apply 再看结果。
+#
+#   引脚信号 TIM2_CH2：`probe . PA1` 列出的可选项。
+# =====================================================================
+
+set mode TIM2 "Input_Capture2_from_TI2"
+set pin PA1 TIM2_CH2
+set gpio parameters "PA1" "GPIO_PuPd" "GPIO_PULLUP"
+set gpio parameters "PA1" "GPIO_Speed" "GPIO_SPEED_FREQ_LOW"
+set gpio parameters "PA1" "GPIO_Label" "FAN_TACH"
+set ip parameters TIM2 Prescaler 83
+# ⚠️ 这一行**不会出现在 .ioc 里**，属正常：32 位定时器 Period 的默认值就是
+#    4294967295（见上面那条 IP 定义），CubeMX 不落「等于默认值」的键。
+#    写出来是为了表达意图；确认要去生成的 MX_TIM2_Init() 里看。
+set ip parameters TIM2 Period 4294967295
+
+# =====================================================================
+# 三、继电器：PB0（高电平触发，初始低 = 断开）
+# =====================================================================
+#   PB0 只驱动继电器模块的 IN（模块自带三极管/光耦，输入是高阻），
+#   线圈那 5V 走独立电源，不占板子的 3.3V 轨。
+#   初始电平 LOW：MX_GPIO_Init() 就会把引脚置低，上电瞬间继电器不动。
+#
+# 键名出处：GPIO_ModeDefaultOutputPP / GPIO_PuPd / GPIO_Speed / GPIO_Label
+#   沿用 r3 配方里已验证过的那套（PB6/PB7）。PinState 是输出脚初始电平的键，
+#   依据 CubeMX 自带板级模板 C41_..._AllConfig.ioc 里
+#   `PC0.GPIOParameters=GPIO_Label,PinState` + `PC0.PinState=GPIO_PIN_SET`。
+# =====================================================================
+
+set pin PB0 GPIO_Output
+set gpio parameters "PB0" "GPIO_ModeDefaultOutputPP" "GPIO_MODE_OUTPUT_PP"
+set gpio parameters "PB0" "GPIO_PuPd" "GPIO_NOPULL"
+set gpio parameters "PB0" "GPIO_Speed" "GPIO_SPEED_FREQ_LOW"
+set gpio parameters "PB0" "GPIO_Label" "RELAY_IN"
+set gpio parameters "PB0" "PinState" "GPIO_PIN_RESET"
+
+# =====================================================================
+# 四、有源蜂鸣器：PB1（低电平触发，初始高 = 静音）
+# =====================================================================
+#   初始电平必须是 HIGH：否则 MX_GPIO_Init() 之后到应用层把它拉高之前，
+#   蜂鸣器会响一下（低电平触发）。有源蜂鸣器自带振荡，MCU 侧只需给电平。
+# =====================================================================
+
+set pin PB1 GPIO_Output
+set gpio parameters "PB1" "GPIO_ModeDefaultOutputPP" "GPIO_MODE_OUTPUT_PP"
+set gpio parameters "PB1" "GPIO_PuPd" "GPIO_NOPULL"
+set gpio parameters "PB1" "GPIO_Speed" "GPIO_SPEED_FREQ_LOW"
+set gpio parameters "PB1" "GPIO_Label" "BUZZER_IO"
+set gpio parameters "PB1" "PinState" "GPIO_PIN_SET"

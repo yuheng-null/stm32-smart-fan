@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/app_main.c
 
     module/temperature/temperature.c
+    module/fan_control/fan_control.c
 
     # 总线驱动（贴 HAL 的那一层）
     driver/bus/i2c/i2c_soft.c
@@ -61,9 +62,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     # 板级绑定
     bsp/bsp_adc.c
+    bsp/bsp_buzzer.c
+    bsp/bsp_fan.c
     bsp/bsp_i2c.c
     bsp/bsp_key.c
     bsp/bsp_oled.c
+    bsp/bsp_relay.c
     bsp/bsp_system.c
     bsp/bsp_uart.c
 )
