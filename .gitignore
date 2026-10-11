@@ -24,6 +24,30 @@ __pycache__/
 # 换机器后会由扩展自己重建，不进仓库
 .settings/
 
+# CubeMX 拷进来、本工程用不到的 CMSIS 组件。
+#
+# CubeMX 每次生成都会把整套 CMSIS 拷进 Drivers/CMSIS/，其中这几份与
+# STM32F407 的裸机开发无关：DSP 库（900 多个文件）、神经网络库、
+# Cortex-A 支持、调试探针固件、RTOS 头、文档。
+#
+# ⚠️ **删除是徒劳的**：实测（2026-10-11）把这几个目录删掉后再跑一次生成，
+#    CubeMX 会把它们**原样拷回来**（副本实验：504 个文件 → 1576 个）。
+#    所以每次改配置都会在 git 里留下一坨一千多个文件的无用 diff。
+#    正确的做法是「文件留着、但不入库」——CubeMX 想拷就拷，git 不管它。
+#
+# 构建真正用到的只有 Drivers/CMSIS/Device/（设备头）与 Drivers/CMSIS/Include/
+# （内核头），那两份仍然入库；Drivers/CMSIS/LICENSE.txt 同样入库（NOTICE 引用了它）。
+#
+# 已验证：把这几个目录整个删掉，`cmake --build` 仍然通过，且产物逐字节相同。
+Drivers/CMSIS/Core/
+Drivers/CMSIS/Core_A/
+Drivers/CMSIS/DAP/
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/Documentation/
+Drivers/CMSIS/NN/
+Drivers/CMSIS/RTOS/
+Drivers/CMSIS/RTOS2/
+
 # Windows
 Thumbs.db
 desktop.ini

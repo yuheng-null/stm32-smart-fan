@@ -562,6 +562,8 @@ python tools/cubemx_apply.py regenerate .
 smart_fan/
 ├── Core/            CubeMX 生成：HAL 适配、main.c、中断向量
 ├── Drivers/         CubeMX 生成：HAL 驱动 + CMSIS
+│                  （其中 DSP/NN/Cortex-A/RTOS 等几份 CMSIS 组件本工程用不到，
+│                   未入库；理由与验证方式写在 .gitignore 里）
 ├── cmake/           CubeMX 生成：CMake 胶水
 ├── interface/       硬件抽象契约（只有声明，无实现、无厂商头文件）
 ├── driver/          驱动
