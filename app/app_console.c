@@ -65,6 +65,20 @@ static fan_cmd_t console_mode_to_cmd(int32_t console_mode)
     }
 }
 
+/**
+ * @brief 发送 snprintf 的结果。
+ *
+ * @param len snprintf 的返回值。截断时它返回的是「本该写多长」，
+ *            比缓冲区还大 —— 直接拿去发会**读越界**。所以截断就不发：
+ *            宁可少一行，也不要发一行被悄悄切掉尾部的内容。
+ */
+static void console_send_line(const char *text, int len, size_t cap)
+{
+    if ((len > 0) && ((size_t)len < cap)) {
+        (void)app_console_send(text, (uint32_t)len);
+    }
+}
+
 /** @brief 发一行回执。 */
 static void console_reply(const char *verb, error_t result)
 {
@@ -77,9 +91,7 @@ static void console_reply(const char *verb, error_t result)
         n = snprintf(line, sizeof(line), "@ACK,%s,ERR,%d\r\n", verb, (int)result);
     }
 
-    if (n > 0) {
-        (void)app_console_send(line, (uint32_t)n);
-    }
+    console_send_line(line, n, sizeof(line));
 }
 
 /** @brief 组一帧当前状态的遥测快照。 */
@@ -137,29 +149,32 @@ static void console_handle_ir(const console_command_t *cmd)
         n = snprintf(line, sizeof(line), "  ir: 还没收到过一帧\r\n");
     }
 
-    if (n > 0) {
-        (void)app_console_send(line, (uint32_t)n);
-    }
+    console_send_line(line, n, sizeof(line));
 
     /*
-     * 这一行同时回答了「遥控灵不灵」的两个问题：
+     * 下面两行同时回答了「遥控灵不灵」的几个不同问题：
      *   · frames 一直不涨 —— 压根没收到，查接收头接线与供电；
      *   · rejects 涨而 frames 不涨 —— 收得到但解不出，看 last 是卡在哪一段
      *     （引导码? 位? 反码校验?），分别指向接线干扰、遥控器不兼容、
      *     以及「码是对的但校验不过」这三类不同的问题；
      *   · dropped 非 0 —— 主循环被长时间阻塞，边沿在缓冲里溢出了。
+     *
+     * 分成两行不是为了好看：挤成一行时最坏情况会超过行缓冲的一半，
+     * 一旦截断，console_send_line() 会整行丢掉——那就什么都看不到了。
      */
     n = snprintf(line, sizeof(line),
-                 "  ir: frames=%lu repeats=%lu rejects=%lu (last: %s)"
-                 " | edges=%lu dropped=%lu%s\r\n",
+                 "  ir: frames=%lu repeats=%lu rejects=%lu (last: %s)\r\n",
                  (unsigned long)ir.frames, (unsigned long)ir.repeats,
-                 (unsigned long)ir.rejects, ir.last_reject,
+                 (unsigned long)ir.rejects, ir.last_reject);
+
+    console_send_line(line, n, sizeof(line));
+
+    n = snprintf(line, sizeof(line),
+                 "  ir: edges=%lu dropped=%lu%s\r\n",
                  (unsigned long)ir.edges, (unsigned long)ir.dropped,
                  ir.learn ? "  [学习模式]" : "");
 
-    if (n > 0) {
-        (void)app_console_send(line, (uint32_t)n);
-    }
+    console_send_line(line, n, sizeof(line));
 
     console_reply(cmd->verb, ERR_OK);
 }
@@ -212,9 +227,7 @@ static void console_execute(const console_command_t *cmd, error_t parse_result)
                                    (long)app_control_get_target_temp(),
                                    (unsigned)status.manual_duty_percent);
 
-            if (n > 0) {
-                (void)app_console_send(line, (uint32_t)n);
-            }
+            console_send_line(line, n, sizeof(line));
         }
 
         console_reply(cmd->verb, ERR_OK);
