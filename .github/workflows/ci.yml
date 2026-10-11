@@ -23,7 +23,7 @@ jobs:
     name: 宿主机单元测试
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装构建工具
         # runner 自带 cmake，ninja 显式装一次，避免依赖镜像默认值。
@@ -44,7 +44,7 @@ jobs:
     name: 固件交叉编译
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 ARM 交叉工具链
         # libnewlib-arm-none-eabi 不能省：链接参数里带 --specs=nano.specs，
