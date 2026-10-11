@@ -204,6 +204,16 @@ error_t thermal_control_init(thermal_controller_t *ctl, const thermal_config_t *
         ctl->pi_state.cfg.out_min = (float)ctl->cfg.duty_min_effective_percent;
     }
 
+    /*
+     * 抬高之后必须重新校验区间：pi_init() 只验过**原样**的 out_min < out_max，
+     * 若调用方给的 out_max 还小于 duty_min（例如 duty_min=100、out_max=50），
+     * 这里就会造出一个 out_min > out_max 的 PI——clampf() 会把任何输入都夹成
+     * out_min，输出被钉死，而环路上看不出任何异常。
+     */
+    if (!(ctl->pi_state.cfg.out_min < ctl->pi_state.cfg.out_max)) {
+        return ERR_INVALID_PARAM;
+    }
+
     ctl->ready = true;
 
     return ERR_OK;
@@ -225,32 +235,35 @@ error_t thermal_control_step(thermal_controller_t *ctl,
 
     const float dt = thermal_control_dt_s(ctl, now_ms);
 
-    /* ---- 温度有效性（去抖） ---- */
-    const bool temp_valid = (temp != NULL) && (temp->valid);
-    debounce_step(&ctl->invalid_streak, !temp_valid, &ctl->in_temp_fallback,
-                  ctl->cfg.invalid_debounce_samples);
+    /*
+     * ---- 温度有效性（非对称去抖：进得慢、出得也慢）----
+     *
+     * 进兜底与退出兜底用的**不是同一个阈值**，所以这里必须按当前认定的方向
+     * 选 need，不能只传 invalid_debounce_samples：
+     *   · 进入（当前不在兜底、要看「连续多少拍无效」）→ invalid_debounce_samples
+     *   · 退出（当前在兜底、要看「连续多少拍有效」）  → recovery_debounce_samples
+     *
+     * 两个方向**共用一个 temp_streak**，因为方向已由 in_temp_fallback 表达：
+     * 「与当前认定相反的连续拍数」在进入方向就是连续无效数，在退出方向就是
+     * 连续有效数。若两个方向共用同一个阈值，退出就会提前发生，
+     * recovery_debounce_samples 也就形同虚设了。
+     */
+    const bool     temp_valid   = (temp != NULL) && (temp->valid);
+    const bool     was_fallback = ctl->in_temp_fallback;
+    const uint16_t temp_need    = was_fallback ? ctl->cfg.recovery_debounce_samples
+                                               : ctl->cfg.invalid_debounce_samples;
+
+    debounce_step(&ctl->temp_streak, !temp_valid, &ctl->in_temp_fallback, temp_need);
 
     /*
-     * 兜底是「进得慢、出得也慢」的非对称去抖：
-     * 进兜底用 invalid_debounce_samples，退出用 recovery_debounce_samples。
-     * 退出时顺手清掉曲线的迟滞记忆——它在兜底期间没被更新，已经陈旧，
+     * 退出兜底时顺手清掉曲线的迟滞记忆——它在兜底期间没被更新，已经陈旧，
      * 留着会把重入后的第一个目标转速挡住。
+     *
+     * 挂在「下降沿」上（用调用前的状态判断），而不是嵌在计数器里：
+     * 这样无论将来阈值怎么调，清理都只在真正退出兜底的那一拍发生一次。
      */
-    if (ctl->in_temp_fallback) {
-        if (temp_valid) {
-            if (ctl->valid_streak < UINT16_MAX) {
-                ctl->valid_streak++;
-            }
-            if (ctl->valid_streak >= ctl->cfg.recovery_debounce_samples) {
-                ctl->in_temp_fallback = false;
-                ctl->valid_streak     = 0U;
-                fan_curve_reset(&ctl->curve_state);
-            }
-        } else {
-            ctl->valid_streak = 0U;
-        }
-    } else {
-        ctl->valid_streak = 0U;
+    if (was_fallback && !ctl->in_temp_fallback) {
+        fan_curve_reset(&ctl->curve_state);
     }
 
     /* ---- 目标转速 ---- */
@@ -307,6 +320,15 @@ error_t thermal_control_step(thermal_controller_t *ctl,
                               + ((1.0f - alpha) * ctl->rpm_filtered);
         }
         ctl->rpm_filtered_valid = true;
+    } else {
+        /*
+         * 无有效转速期间，滤波值失去意义：它可能是断线**之前**的读数，而这段
+         * 时间里风扇的实际转速早变了。不清掉的话，转速恢复后的头几拍会把陈旧值
+         * 按 (1−alpha) 的比重混进来喂给 PI。
+         * 清掉之后，恢复的第一个有效样本走上面「直接采信」那条分支——正是
+         * 「第一个样本」应有的处理。
+         */
+        ctl->rpm_filtered_valid = false;
     }
 
     /* ---- 转速丢失（去抖） ----

@@ -35,7 +35,7 @@ error_t fan_control_rpm_from_period_us(uint32_t period_us, uint32_t *rpm)
 
     /*
      * 间隔长到不足 1 RPM（period_us > 30e6，即 30 秒半转）——风扇不可能这么慢，
-     * 实际含义是「转得很慢或已经停了」。返回 UNDEFLOW 让调用方明确按 0 处理，
+     * 实际含义是「转得很慢或已经停了」。返回 ERR_UNDERFLOW 让调用方明确按 0 处理，
      * 而不是拿到一个悄悄变成 0 的值分不清是慢还是出错。
      */
     if (value == 0U) {

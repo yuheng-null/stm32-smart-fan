@@ -110,6 +110,16 @@ error_t pi_step_error(pi_t *pi, float error, float dt_s, float *out)
     if (!(dt_s > 0.0f)) {
         return ERR_INVALID_PARAM;
     }
+    /*
+     * 误差也要挡：clampf(NaN, lo, hi) 两个比较都为假，会把 NaN 原样返回，
+     * 于是积分器与 last_out 一起被写成 NaN —— 而 NaN 会在**之后每一拍**继续
+     * 传播（NaN 参与的任何运算还是 NaN），控制器静默失效且永不恢复。
+     * 用 error == error 判 NaN（NaN 是唯一不等于自身的值），与上面 dt 的
+     * !(...) 写法是同一个思路，都不依赖 <math.h>。
+     */
+    if (!(error == error)) {
+        return ERR_INVALID_PARAM;
+    }
 
     const float p_term = pi->cfg.kp * error;
     const float i_next = pi->integrator + (pi->cfg.ki * error * dt_s);

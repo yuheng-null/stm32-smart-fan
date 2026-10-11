@@ -99,7 +99,7 @@ typedef struct {
     bool             key_long_fired[FAN_KEY_COUNT];
 
     fan_alarm_t      alarms;               /**< 本模块自己判定出的报警位 */
-    fan_alarm_t      held_alarms;          /**< 由 app 透传进来的外部报警（如未标定、屏不在） */
+    fan_alarm_t      held_alarms;          /**< 由 app 透传进来的外部报警（如 NTC 标定状态、屏不在） */
     fan_alarm_t      prev_total;           /**< 上一拍的报警全量，用于算出「新增」 */
 
     bool             ready;
@@ -145,7 +145,7 @@ error_t fan_fsm_step(fan_fsm_t *fsm, const fan_event_t *event, uint32_t now_ms,
                      fan_fsm_output_t *out);
 
 /**
- * @brief 由 app 注入「外部报警位」（例如 NTC 未标定、OLED 不在）。
+ * @brief 由 app 注入「外部报警位」（例如 NTC 标定状态、OLED 不在）。
  *
  * 这些报警不影响模式迁移，但要能出现在遥测与屏幕上，所以让 app 透传进来，
  * 由本模块统一并入输出，避免 app 和状态机各拼一份、拼法不一致。

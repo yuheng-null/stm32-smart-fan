@@ -319,18 +319,31 @@ static void test_set_gains_keeps_state(void)
 /*
  * ── 仿真对象：一阶惯性 + 死区时间 + 占空比整数化 ─────────────────────
  *
- * 这三个特征**都是板上实测到的**，缺一个这个仿真就抓不到真实的整定错误：
- *   · 静态增益 K ≈ 163 rpm/%（README 实测拟合）
+ * 这几个特征**都是板上实测到的**，缺一个这个仿真就抓不到真实的整定错误：
+ *   · 静态增益 K ≈ 163 rpm/%、截距 190 rpm（README 实测最小二乘拟合）
  *   · 时间常数 τ ≈ 1.4 s      （2026-10-11 阶跃辨识 20%→60%）
  *   · 死区约 0.3 s            （阶跃响应起步那段平坦）
  *   · 固件把占空比落成**整数百分比**，1% = 163 rpm，这是个很粗的执行器
+ *
+ * 稳态式与 module/fan_control/fan_control.h 的经验模型**逐字同源**
+ * （rpm = 163×duty + 190），截距不能省：省掉它，对象的稳态工作点就比真实的
+ * 偏低 190/163 ≈ 1.2% 占空比，那样算出来的稳态值与断言容差之间的关系会失真。
  *
  * 为什么必须带死区：本工程第一版按假定的 τ=0.3 s 整定，板上**持续振荡**
  * （2717~9868 rpm，周期约 4.5 s）。用不带死区的模型仿真时它却是稳定的——
  * 也就是说，**没有死区的仿真会给出虚假的通过**。这条用例的意义就在这里。
  */
 #define PLANT_GAIN      (163.0f)    /* rpm / % */
+#define PLANT_INTERCEPT (190.0f)    /* rpm，经验模型的截距 */
 #define PLANT_TAU_S     (1.4f)      /* s */
+
+/*
+ * 第一版的发布增益（按**假定** τ = 0.3 s 整定，见 docs/control.md §4.1）。
+ * 保留在这里是为了给「按错的 τ 整定 → 上板振荡」这个结论留一条回归护栏：
+ * 下面 test_first_version_gains_... 会验证它在同一个仿真里**必须**振起来。
+ */
+#define V1_KP           (0.0037f)
+#define V1_KI           (0.0123f)
 
 /*
  * 等效死区。
@@ -369,28 +382,33 @@ static float plant_advance(float duty, float rpm, float dt_s)
     g_delay[g_delay_idx] = (float)((int)(duty + 0.5f));
     g_delay_idx = (uint8_t)((g_delay_idx + 1U) % g_delay_len);
 
-    const float steady = PLANT_GAIN * applied;
+    const float steady = (PLANT_GAIN * applied) + PLANT_INTERCEPT;
 
     return rpm + ((steady - rpm) * (dt_s / PLANT_TAU_S));
 }
 
 /**
- * 在**实测辨识出来的对象**上做闭环仿真——本文件里最关键的一条。
+ * 在**实测辨识出来的对象**上跑一次闭环，回报三个观测量。
  *
- * 增益取的是 app/app_control.c 里的发布值（IMC，λ = 2.5τ）。
- * 断言的是**收敛与不振荡**，而不是某一步的具体数值：
- *   ① 40 s 后转速贴住目标；
- *   ② 末段 5 s 的峰峰波动很小（抓「参数过于激进导致极限环」）。
+ * 跑 40 s 让环路稳定，再跑 5 s 量末段的峰峰波动。三条断言（收敛、稳态占空比、
+ * 没有极限环）共用这一段仿真，所以抽成函数——两处（新版增益 / 第一版增益）
+ * 必须是**同一个对象、同一段时长**，否则「新版稳、旧版振」这个对照就不成立。
+ *
+ * @param kp, ki     被测增益。
+ * @param target     设定转速。
+ * @param final_rpm  输出，40 s 时的转速。
+ * @param final_duty 输出，40 s 时的占空比（整数百分比）。
+ * @param tail_pk_pk 输出，末段 5 s 的峰峰波动。
  */
-static void test_closes_loop_on_identified_plant(void)
+static void simulate_closed_loop(float kp, float ki, float target,
+                                 float *final_rpm, float *final_duty, float *tail_pk_pk)
 {
     const float   dt     = 0.1f;
-    const float   target = 6000.0f;
     const uint8_t dead_n = (uint8_t)((PLANT_DEAD_S / dt) + 0.5f);
 
     const pi_config_t cfg = {
-        .kp                     = 0.0034f,
-        .ki                     = 0.0025f,
+        .kp                     = kp,
+        .ki                     = ki,
         .out_min                = 0.0f,
         .out_max                = 100.0f,
         .out_rate_limit_per_s   = 0.0f,
@@ -410,17 +428,13 @@ static void test_closes_loop_on_identified_plant(void)
         rpm = plant_advance(duty, rpm, dt);
     }
 
-    TEST_ASSERT_FLOAT_WITHIN(target * 0.02f, target, rpm);
+    *final_rpm  = rpm;
+    *final_duty = duty;
 
-    /* 稳态工作点合理：6000 rpm 需要约 (6000−190)/163 ≈ 35.6% */
-    TEST_ASSERT_FLOAT_WITHIN(4.0f, (target - 190.0f) / PLANT_GAIN, duty);
-
-    /* 再跑 50 拍（5 s），确认没有极限环。
-       容许的峰峰波动就是 1% 占空比的量化台阶（163 rpm），留一倍余量。 */
     float lo = 1.0e9f;
     float hi = -1.0e9f;
 
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < 50; i++) {           /* 再 5 s，量末段波动 */
         TEST_ASSERT_EQUAL_INT(ERR_OK, pi_step(&pi, target, rpm, dt, &duty));
         rpm = plant_advance(duty, rpm, dt);
 
@@ -428,7 +442,61 @@ static void test_closes_loop_on_identified_plant(void)
         if (rpm > hi) { hi = rpm; }
     }
 
-    TEST_ASSERT_FLOAT_WITHIN(320.0f, 0.0f, hi - lo);
+    *tail_pk_pk = hi - lo;
+}
+
+/**
+ * 发布增益在实测辨识出来的对象上必须**收敛且不振荡**。
+ *
+ * 增益取的是 app/app_control.c 里的发布值（IMC，λ = 2.5 s）。
+ * 断言的是结构性质而不是某一步的具体数值：
+ *   ① 40 s 后转速贴住目标；
+ *   ② 稳态工作点合理（6000 rpm 需要约 (6000−190)/163 ≈ 35.6% 占空比）；
+ *   ③ 末段 5 s 的峰峰波动在一个量化台阶的量级（抓「参数过于激进导致极限环」）。
+ */
+static void test_closes_loop_on_identified_plant(void)
+{
+    const float target = 6000.0f;
+
+    float rpm     = 0.0f;
+    float duty    = 0.0f;
+    float pk_pk   = 0.0f;
+
+    simulate_closed_loop(0.0034f, 0.0025f, target, &rpm, &duty, &pk_pk);
+
+    TEST_ASSERT_FLOAT_WITHIN(target * 0.02f, target, rpm);
+    TEST_ASSERT_FLOAT_WITHIN(4.0f, (target - PLANT_INTERCEPT) / PLANT_GAIN, duty);
+
+    /* 容许的峰峰波动就是 1% 占空比的量化台阶（163 rpm），留一倍余量。 */
+    TEST_ASSERT_FLOAT_WITHIN(320.0f, 0.0f, pk_pk);
+}
+
+/**
+ * ⭐ **第一版的增益必须在这个仿真里重新振起来。**
+ *
+ * 这是全项目最要紧的一条回归护栏。docs/control.md §4.1 记的那次事故是：
+ * 按**假定** τ = 0.3 s 整定出的 Kp=0.0037 / Ki=0.0123，上板立刻持续振荡
+ * （2717~9868 rpm，周期约 4.5 s），根因是积分时间恰好等于那个错的 τ。
+ *
+ * 为什么必须把「旧增益会振」也断言下来，而不是只断言「新增益稳定」：
+ * 只测后者的话，任何人把这个仿真的参数（τ、死区）调松，两条断言照样通过，
+ * 而 §4.1 那个结论就失去了可复现性。**有区分度的测试才是有价值的测试**——
+ * 这条用例专门负责证明「这个仿真确实能分辨好坏整定」。
+ *
+ * 判据取「末段峰峰 > 1000 rpm」：远超 1% 占空比的量化台阶（163 rpm），
+ * 与实测的 ±3500 rpm 极限环同量级而留足余量，不会因编译器的浮点细节而翻。
+ */
+static void test_first_version_gains_reproduce_the_board_limit_cycle(void)
+{
+    float rpm   = 0.0f;
+    float duty  = 0.0f;
+    float pk_pk = 0.0f;
+
+    simulate_closed_loop(V1_KP, V1_KI, 6000.0f, &rpm, &duty, &pk_pk);
+
+    TEST_ASSERT_TRUE_MESSAGE(pk_pk > 1000.0f,
+                             "第一版增益(按假定 tau 整定)必须在该对象上再现极限环；"
+                             "若这里是绿的，说明仿真已经失去区分度");
 }
 
 /* ---------------------------------------------------------------- main */
@@ -455,6 +523,7 @@ int main(void)
     RUN_TEST(test_set_gains_keeps_state);
 
     RUN_TEST(test_closes_loop_on_identified_plant);
+    RUN_TEST(test_first_version_gains_reproduce_the_board_limit_cycle);
 
     return UNITY_END();
 }

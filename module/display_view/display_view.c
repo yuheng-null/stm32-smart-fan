@@ -156,6 +156,14 @@ error_t display_view_build(const display_view_input_t *in, display_view_t *out)
         return ERR_INVALID_PARAM;
     }
 
+    /*
+     * 先整体清零。调用方（app_display）用 memcmp 比较「这一帧和上一帧是否
+     * 完全一样」来决定要不要整屏刷新——而 snprintf 只写到自己那一段 NUL 为止，
+     * 其后的字节保持栈上的残留值。不清零的话，这些残留字节会参与比较：
+     * 内容其实没变，却被判成「变了」，白白多刷一次几十毫秒的屏。
+     */
+    *out = (display_view_t){0};
+
     /* ---- 大字号温度 ---- */
     if (in->temp_valid) {
         format_celsius(in->temp_milli_c, out->temp_text, sizeof(out->temp_text));
@@ -173,7 +181,7 @@ error_t display_view_build(const display_view_input_t *in, display_view_t *out)
     } else {
         char tset[16];
 
-        format_celsius((int32_t)in->target_temp_milli_c, tset, sizeof(tset));
+        format_celsius(in->target_temp_milli_c, tset, sizeof(tset));
         (void)snprintf(out->lines[0], DISPLAY_VIEW_LINE_CHARS,
                        "Tset  %s  (K1/K2)", tset);
     }

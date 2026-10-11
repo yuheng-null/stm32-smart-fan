@@ -8,7 +8,8 @@
  *
  * ── 仿真用的一阶对象 ─────────────────────────────────────────────────
  *     稳态转速 rpm_ss = 163 × duty + 190      （与 fan_control 的经验模型同源）
- *     惯性       rpm ← rpm + (rpm_ss − rpm) · dt/τ ，τ = 0.3 s（假定值）
+ *     惯性       rpm ← rpm + (rpm_ss − rpm) · dt/τ ，τ = 1.4 s
+ *   τ 取 **2026-10-11 板上阶跃辨识**的实测值（见 docs/control.md §4.2）。
  *   把「对象」与「模型」写成同一个式子是有意的：这样测试验证的是
  *   **控制器结构**（能不能收敛、边界对不对），而不是模型误差。
  */
@@ -55,8 +56,10 @@ static thermal_config_t base_config(void)
         },
         .control_period_ms          = 100U,
         .fallback_rpm               = 8000U,
+        /* 与 app/app_control.c 的生产配置一致，且**两个方向故意取不同的值**：
+           非对称去抖（进 3 拍、出 5 拍）只有在两者不相等时才测得出。 */
         .invalid_debounce_samples   = 3U,
-        .recovery_debounce_samples  = 3U,
+        .recovery_debounce_samples  = 5U,
         .temp_offset_milli_c        = 0,
         .duty_min_effective_percent = 20U,
         .rpm_ema_alpha              = 1.0f,   /* 不过滤，保证测试确定 */
@@ -423,8 +426,23 @@ static void test_fallback_recovers_after_debounce(void)
     TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_get_status(&ctl, &status));
     TEST_ASSERT_TRUE(status.in_temp_fallback);
 
-    /* 连续 3 次有效之后应退出兜底，报警清零，目标回到曲线值 */
+    /*
+     * 退出走的是 recovery_debounce_samples（5 拍），**不是**进入用的那个 3。
+     * 这两拍之差就是「非对称」的全部含义：先确认第 3 拍还在兜底里
+     * （若退出误用了进入阈值，这里就会提前退出、断言失败），再走满 5 拍。
+     */
     for (int i = 0; i < 3; i++) {
+        tick += 100U;
+        const temperature_sample_t good = make_temp(35000, true, tick);
+        TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_step(&ctl, &good, NULL, tick, &duty, &alarms));
+    }
+
+    TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_get_status(&ctl, &status));
+    TEST_ASSERT_TRUE_MESSAGE(status.in_temp_fallback,
+                             "有效 3 拍后仍在兜底：退出阈值必须是 recovery 的 5 拍");
+
+    /* 走满第 5 拍才退出：报警清零，目标回到曲线值 */
+    for (int i = 0; i < 2; i++) {
         tick += 100U;
         const temperature_sample_t good = make_temp(35000, true, tick);
         TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_step(&ctl, &good, NULL, tick, &duty, &alarms));
@@ -435,6 +453,52 @@ static void test_fallback_recovers_after_debounce(void)
     TEST_ASSERT_FALSE(status.in_temp_fallback);
     TEST_ASSERT_EQUAL_UINT32(0U, status.alarms & FAN_ALARM_TEMP_INVALID);
     TEST_ASSERT_EQUAL_UINT32(5000U, status.target_rpm);
+}
+
+/**
+ * 非对称去抖的**另一半**：进兜底要连续 3 拍无效，中间只要有一次有效就重新计数。
+ *
+ * 这条与上一条合起来才锁住「进得慢、出得也慢」这个行为；单看一条都可能被
+ * 一个把两个阈值混用的实现蒙混过去。
+ */
+static void test_fallback_entry_debounce_restarts_on_a_valid_sample(void)
+{
+    thermal_controller_t ctl    = {0};
+    thermal_status_t     status = {0};
+    uint8_t              duty   = 0U;
+    fan_alarm_t          alarms = FAN_ALARM_NONE;
+    uint32_t             tick   = 0U;
+
+    TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_init(&ctl, fresh_config()));
+
+    /* 无效 2 拍 → 有效 1 拍（计数清零）→ 再无效 2 拍：累计无效只有 2 拍，不该进兜底 */
+    for (int i = 0; i < 2; i++) {
+        tick += 100U;
+        const temperature_sample_t bad = make_temp(0, false, tick);
+        TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_step(&ctl, &bad, NULL, tick, &duty, &alarms));
+    }
+
+    tick += 100U;
+    const temperature_sample_t good = make_temp(35000, true, tick);
+    TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_step(&ctl, &good, NULL, tick, &duty, &alarms));
+
+    for (int i = 0; i < 2; i++) {
+        tick += 100U;
+        const temperature_sample_t bad = make_temp(0, false, tick);
+        TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_step(&ctl, &bad, NULL, tick, &duty, &alarms));
+    }
+
+    TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_get_status(&ctl, &status));
+    TEST_ASSERT_FALSE_MESSAGE(status.in_temp_fallback,
+                              "中间插进一拍有效就该重新计数，2 拍无效不足以进兜底");
+
+    /* 再来 1 拍无效（连续到了 3）才进兜底 */
+    tick += 100U;
+    const temperature_sample_t bad = make_temp(0, false, tick);
+    TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_step(&ctl, &bad, NULL, tick, &duty, &alarms));
+
+    TEST_ASSERT_EQUAL_INT(ERR_OK, thermal_control_get_status(&ctl, &status));
+    TEST_ASSERT_TRUE(status.in_temp_fallback);
 }
 
 /* ---------------------------------------------------------- 转速丢失 */
@@ -661,6 +725,7 @@ int main(void)
     RUN_TEST(test_invalid_reading_never_steers_the_fan);
     RUN_TEST(test_persistent_invalid_temperature_enters_fallback);
     RUN_TEST(test_fallback_recovers_after_debounce);
+    RUN_TEST(test_fallback_entry_debounce_restarts_on_a_valid_sample);
 
     RUN_TEST(test_tach_lost_falls_back_to_open_loop);
     RUN_TEST(test_tach_loss_not_reported_when_fan_commanded_off);

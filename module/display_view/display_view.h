@@ -47,7 +47,7 @@ typedef struct {
     uint32_t    rpm;
     uint8_t     duty_percent;
     uint32_t    target_rpm;
-    uint32_t    target_temp_milli_c;   /**< 当前设定温度（曲线起步点 + 偏移） */
+    int32_t     target_temp_milli_c;   /**< 当前设定温度（曲线起步点 + 偏移），可正可负 */
     uint8_t     manual_duty_percent;
     fan_alarm_t alarms;
 } display_view_input_t;

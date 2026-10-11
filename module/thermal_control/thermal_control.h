@@ -21,10 +21,11 @@
  *      「同样的占空比能吹出多少风」。闭到转速上，这些扰动由内环吸收，
  *      外环看到的对象始终是线性的。
  *
- * ── 对两个「未标定」的免疫 ───────────────────────────────────────────
- *   · rpm 绝对倍率未标定（每转脉冲数可能 ≠ 2）：曲线纵轴与内环的实测值
- *     **同单位**，倍率误差在闭环内被消掉，只影响显示数字的物理含义。
- *   · NTC 参数未校准：影响的是曲线**横轴**（温度），因此它会平移工作点。
+ * ── 对两处「物理刻度」的免疫 ─────────────────────────────────────────
+ *   · rpm 的绝对倍率：曲线纵轴与内环的实测值**同单位**（都来自
+ *     fan_control_rpm_from_period_us），倍率误差在闭环内被消掉，
+ *     只影响显示数字的物理刻度。
+ *   · NTC 的绝对刻度：影响的是曲线**横轴**（温度），因此它会平移工作点。
  *     这是为什么本模块把偏移量暴露给用户（串口 TEMP / 按键），而不是把
  *     某个绝对温度焊死在代码里。
  * ────────────────────────────────────────────────────────────────────
@@ -84,8 +85,7 @@ typedef struct {
     uint32_t         target_rpm;       /**< 本周期的目标转速 */
     uint8_t          duty_percent;     /**< 本周期的输出占空比 */
 
-    uint16_t         invalid_streak;   /**< 温度：连续「无效」的拍数 */
-    uint16_t         valid_streak;     /**< 温度：连续「有效」的拍数（退出兜底用） */
+    uint16_t         temp_streak;      /**< 温度：与当前认定**相反**的连续拍数（两个方向共用） */
     bool             in_temp_fallback; /**< 温度是否处于兜底状态 */
     bool             tach_lost;        /**< 转速是否已判定为丢失（去抖后） */
     uint16_t         tach_lost_streak; /**< 转速：与当前认定相反的连续拍数 */
@@ -104,7 +104,13 @@ typedef struct {
     float       rpm_filtered;
     uint8_t     duty_percent;
     int32_t     temp_offset_milli_c;
-    uint32_t    target_temp_milli_c;  /**< 当前工作点对应的曲线温度（供显示 Tset） */
+    /**
+     * 当前工作点对应的曲线温度（供显示 Tset）：曲线起步点 + 用户偏移。
+     *
+     * 用有符号类型：偏移可正可负，起步点加上一个足够负的偏移就会是负数；
+     * 若用 uint32_t，负值会回绕成约 4.29e9 被原样打印出去。
+     */
+    int32_t     target_temp_milli_c;
     fan_alarm_t alarms;
     bool        in_temp_fallback;
     bool        tach_lost;
@@ -133,8 +139,11 @@ error_t thermal_control_init(thermal_controller_t *ctl, const thermal_config_t *
  * @return error_t ERR_OK；ERR_INVALID_PARAM 空指针；ERR_NOT_INITIALIZED 未 init。
  *
  * @note dt 由**真实 tick 差**算出（首拍与 tick 未前进时退化为标称周期），
- *       并夹在 [标称周期, 10×标称周期] 内——后者用来挡住「主循环被长时间
- *       阻塞后，积分一拍吃进一个巨大的 dt」这种极端情况。
+ *       并且**只设上界**（10×标称周期）——用来挡住「主循环被长时间阻塞后，
+ *       积分一拍吃进一个巨大的 dt」这种极端情况。
+ *       不设下界：两拍之间真的只过了 30 ms 时，那 30 ms 就是真实的积分区间，
+ *       把它抬到标称周期反而会多算积分量。调用方若以快于标称的节奏调用，
+ *       得到的就是按真实时间积分的正确结果。
  */
 error_t thermal_control_step(thermal_controller_t *ctl,
                              const temperature_sample_t *temp,

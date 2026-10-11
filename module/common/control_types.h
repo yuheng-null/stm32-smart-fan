@@ -33,7 +33,7 @@
  */
 typedef struct {
     int32_t  milli_c;   /**< 摄氏毫度；**仅 valid 时有意义** */
-    uint16_t adc_raw;   /**< 产生本次读数的 ADC 原始计数（不受未标定影响的量） */
+    uint16_t adc_raw;   /**< 产生本次读数的 ADC 原始计数（不经 NTC 换算） */
     error_t  status;    /**< ERR_OK / ERR_UNDERFLOW / ERR_OVERFLOW / … */
     bool     valid;     /**< 恒等于 (status == ERR_OK)，由生产方填写 */
     uint32_t tick_ms;   /**< 采样时刻（bsp_system_get_tick_ms 的值） */
@@ -58,7 +58,7 @@ typedef struct {
 
 /** 运行模式——状态机在图里流转的就是它。 */
 typedef enum {
-    FAN_MODE_INIT = 0,  /**< 上电初始化，尚未接管输出 */
+    FAN_MODE_INIT = 0,  /**< 上电初始化，等待首拍接管输出 */
     FAN_MODE_OFF,       /**< 停机档：占空比 0。⚠️ 实测 0% 时风扇仍 ~295 rpm，不是真停 */
     FAN_MODE_MANUAL,    /**< 手动固定占空比 */
     FAN_MODE_AUTO,      /**< 温控级联（曲线 + 内环 PI） */
@@ -81,7 +81,7 @@ enum {
     FAN_ALARM_TEMP_INVALID      = 1u << 0,   /**< 温度读数无效（超出有效量程） */
     FAN_ALARM_TACH_LOST         = 1u << 1,   /**< FG 无信号 / 停转 */
     FAN_ALARM_RPM_NOT_TRACKING  = 1u << 2,   /**< 内环长时间饱和仍追不上目标转速 */
-    FAN_ALARM_TEMP_UNCALIBRATED = 1u << 3,   /**< NTC 参数未标定，曲线横轴不可信 */
+    FAN_ALARM_TEMP_UNCALIBRATED = 1u << 3,   /**< NTC 用标称参数：温度绝对刻度待两点校准 */
     FAN_ALARM_OLED_ABSENT       = 1u << 4,   /**< 屏不在：仅显示降级，不影响控制 */
 };
 

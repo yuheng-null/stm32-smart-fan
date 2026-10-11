@@ -42,7 +42,7 @@ typedef struct {
     uint8_t     duty_percent;
     int32_t     temp_milli_c;  /**< 毫摄氏度；temp_valid 为假时该值无意义 */
     bool        temp_valid;
-    uint16_t    adc_raw;       /**< ADC 原始计数（不受未标定影响的量） */
+    uint16_t    adc_raw;       /**< ADC 原始计数（不经 NTC 换算） */
     uint32_t    rpm;           /**< 实测转速（观测单位） */
     uint32_t    target_rpm;    /**< 内环目标转速 */
     fan_alarm_t alarms;

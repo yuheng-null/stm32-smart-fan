@@ -129,7 +129,7 @@ static void test_duty_step_clamps_illegal_input_first(void)
 /* ------------------------------------------------------- 经验模型反解 */
 
 /**
- * 反解要与实测点对得上：README 实测 50% → 8527 rpm，
+ * 反解要与**拟合用的**那组实测点对得上：50% → 8527 rpm，
  * 反解回去应当仍在 50% ±2 以内（拟合本身有约 2% 偏差）。
  */
 static void test_duty_from_rpm_roundtrip(void)
