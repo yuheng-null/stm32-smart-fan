@@ -48,11 +48,19 @@ typedef struct {
     uint16_t      pin;
 } key_hw_t;
 
-/** 单个按键的消抖状态。 */
+/**
+ * 单个按键的消抖状态。
+ *
+ * **跨上下文访问的三个字段都必须 volatile**：stable 由 SysTick 中断写、
+ * 主循环读，两个 pending 标志由中断写、由 bsp_key_take_event() 读并清除。
+ * 常有人以「bool 是单字节、Cortex-M4 上单字节读写原子」为由省掉 volatile——
+ * 原子性挡的是**撕裂**，挡不住**编译器把读取提到循环外缓存**。一旦将来开了
+ * LTO 而读取被内联进循环，就可能一直看到陈旧电平。所以这里一个都没省。
+ */
 typedef struct {
-    bool          stable;            /**< 消抖后的稳定状态（true = 按下） */
-    bool          last_raw;          /**< 上一次原始采样（true = 按下） */
-    uint16_t      same_count;        /**< 连续相同采样的次数 */
+    volatile bool stable;            /**< 消抖后的稳定状态（true = 按下） */
+    bool          last_raw;          /**< 上一次原始采样（true = 按下）；仅 ISR 内访问 */
+    uint16_t      same_count;        /**< 连续相同采样的次数；仅 ISR 内访问 */
     volatile bool press_pending;     /**< 有未取走的「按下」事件 */
     volatile bool release_pending;   /**< 有未取走的「松开」事件 */
 } key_state_t;
@@ -186,6 +194,7 @@ bool bsp_key_is_pressed(key_id_t id)
         return false;
     }
 
-    /* bool 是单字节访问，Cortex-M4 上对字节的读写是原子的，不必关中断。 */
+    /* stable 是单字节且已声明 volatile：读到的要么是旧值要么是新值，
+       不会撕裂，也不会被编译器缓存——不必关中断。 */
     return s_key_state[id].stable;
 }

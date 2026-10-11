@@ -6,14 +6,15 @@
  * 后来的人当成「随手填的数」而改坏：
  *
  * ── 曲线锚点 ─────────────────────────────────────────────────────────
- *   横轴（温度）**尚未标定**（NTC 的 R25/B 是假定值），所以它只是「一组合适的
- *   室内舒适控制点」，不是物理真值；纵轴（转速）用的是与内环同源的**观测单位**。
+ *   横轴（温度）按 NTC 的标称参数换算，表达的是一组合适的室内舒适控制点；
+ *   纵轴（转速）用的是与内环同源的**观测单位**。
  *   改这张表不影响算法，也不用动任何别的地方。
  *
  * ── PI 增益 ──────────────────────────────────────────────────────────
- *   由 IMC（λ 整定）从实测的静态增益推出来：Kp = τ/(K·λ)、Ki = 1/(K·λ)。
- *   K ≈ 163 rpm/%（README 实测拟合），τ 取 0.3 s、λ 取 0.5 s **都是假定值**，
- *   τ 必须实测后重算（方法见 module/fan_control/fan_control.h）。
+ *   由 IMC（λ 整定）从**板上实测辨识**的结果推出来：Kp = τ/(K·λ)、Ki = 1/(K·λ)，
+ *   实测 K ≈ 163 rpm/%、τ ≈ 1.4 s。这两个常数不是估计值，来历见下面
+ *   APP_PI_KP 上方的整段说明（含第一版按假定 τ 整定、上板即振荡那次事故）。
+ *   ⚠️ τ 与死区都是**本风扇、本风道**的实测值，换风扇必须重测后重算。
  *
  * ── 为什么不开输出速率限制 ───────────────────────────────────────────
  *   曲线上的迟滞已经把目标转速的变化限制在每 1 ℃ 几百 rpm 之内，输出不会
@@ -62,9 +63,10 @@
  *   这里让曲线从「不转」直接跳到「最小可控转速」，中间不留不可达的台阶。
  *   （thermal_control 里另有一道夹取做兜底，任何曲线都不会漏。）
  *
- * ── 横轴仍然是假设值 ────────────────────────────────────────────────
- *   NTC 未校准，这些摄氏度不是真值；目标是「一组合适的室内舒适控制点」。
- *   运行期可以用串口 TEMP 或按键整体平移，标定后再回填这张表。
+ * ── 这张表的定位 ────────────────────────────────────────────────────
+ *   横轴的物理刻度由 NTC 校准决定（步骤见 docs/control.md 的「标定」），
+ *   这里表达的是一组合适的室内舒适控制点。运行期可以用串口 TEMP 或按键
+ *   整体平移；做完两点校准后按实际温度回填这张表即可。
  *   改这张表不影响任何算法。
  */
 static const fan_curve_point_t s_curve_points[] = {
@@ -97,9 +99,11 @@ static const fan_curve_point_t s_curve_points[] = {
  *   而真实 τ 是 1.4 s —— 积分时间比对象还快近 5 倍，典型的积分致振。
  *
  *   重算时把积分时间钉死在**实测的 τ** 上（IMC 的规矩就是 Ti = τ），
- *   再用 λ 留裕度：取 λ = 2.5τ（而不是原先相当于 λ ≈ 0.5 s 的激进取值）。
- *       Kp = τ/(K·λ) = 1.4/(163 × 3.5) ≈ 0.0034
- *       Ki = 1/(K·λ) = 1/(163 × 3.5)   ≈ 0.0025   →  Ti = Kp/Ki = 1.4 s = τ ✓
+ *   再用 λ 留裕度：取 **λ = 2.5 s**（实测 τ 的约 1.8 倍；原先那版相当于
+ *   λ ≈ 0.5 s，激进得多）。λ 的单位是**秒**，代入的是秒而不是 τ 的倍数——
+ *   下面这两个数就是按 λ = 2.5 s 算出来的，反解 λ = τ/(K·Kp) ≈ 2.53 s 对得上。
+ *       Kp = τ/(K·λ) = 1.4/(163 × 2.5) ≈ 0.0034
+ *       Ki = 1/(K·λ) = 1/(163 × 2.5)   ≈ 0.0025   →  Ti = Kp/Ki ≈ 1.4 s = τ ✓
  *
  *   ⚠️ **换风扇、改风道都要重新测 τ 与死区后重算**，不要照抄这两个数。
  */
@@ -120,6 +124,17 @@ static app_status_t         s_status;
 static bool                 s_ready = false;
 static bool                 s_oled_present = false;
 static int32_t              s_applied_offset = 0;
+
+/**
+ * 最近一次由**级联控制器**算出的占空比。
+ *
+ * 留着它是为了给串口命令路径一个正确的 auto_duty：命令要在**一拍之内**闭环
+ * （见 app_control_dispatch_cmd 的说明），而那一刻控制器还没跑，只能拿上一次
+ * 的结果。这里必须存控制器自己的输出，**不能拿 s_status.duty_percent 顶替**——
+ * 那是最新的**状态机输出**，在 MANUAL 下等于手动档位；用它会让「MANUAL → AUTO」
+ * 的第一拍输出旧的百分比，而不是控制器算出来的值。
+ */
+static uint8_t              s_auto_duty = 0U;
 
 /* ----------------------------------------------------------------- 内部 */
 
@@ -277,6 +292,7 @@ error_t app_control_init(bool oled_present)
     }
 
     s_applied_offset = 0;
+    s_auto_duty      = 0U;
     s_status = (app_status_t){0};
 
     s_ready = true;
@@ -301,6 +317,9 @@ void app_control_task(void)
 
     (void)thermal_control_step(&s_controller, &temp, &rpm, now, &auto_duty, &ctrl_alarms);
 
+    /* 存给命令路径用（命令到达时控制器还没跑本拍），见 s_auto_duty 的说明。 */
+    s_auto_duty = auto_duty;
+
     thermal_status_t ctrl_status;
     (void)thermal_control_get_status(&s_controller, &ctrl_status);
 
@@ -309,7 +328,7 @@ void app_control_task(void)
     const bool tach_valid = !ctrl_status.tach_lost;
 
     /* ---- 外部报警透传（不影响模式迁移，只影响上报） ---- */
-    fan_alarm_t external = FAN_ALARM_TEMP_UNCALIBRATED;   /* NTC 参数尚未标定 */
+    fan_alarm_t external = FAN_ALARM_TEMP_UNCALIBRATED;   /* !CAL：NTC 用标称参数 */
 
     if (!s_oled_present) {
         external |= FAN_ALARM_OLED_ABSENT;
@@ -361,7 +380,7 @@ error_t app_control_dispatch_cmd(fan_cmd_t cmd, int32_t value)
      */
     fan_fsm_output_t out;
     const error_t    err = fan_fsm_step(&s_fsm, &event, event.tick_ms,
-                                        s_status.duty_percent,
+                                        s_auto_duty,
                                         s_status.temp_ok, s_status.tach_ok,
                                         &out);
 

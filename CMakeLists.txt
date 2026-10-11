@@ -82,6 +82,20 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     bsp/bsp_uart.c
 )
 
+#
+# 手写代码的警告门。
+#
+# 顶层 CMakeLists 里的 target_compile_options 只作用于**本 target 的源文件**
+# （即上面 target_sources 列出的 app/ module/ bsp/ driver/），不会传导到
+# cmake/stm32cubemx 那两个库（HAL/CMSIS 是第三方，不按本工程的标准要求它）。
+# 这正是我们要的边界：自己的代码严格，厂商代码不动。
+#
+# 与 tests/CMakeLists.txt 的 -Wall -Wextra -Werror 保持同一套标准：手写代码一律
+# 零警告。工具链里已经有 -Wall，这里补 -Wextra。
+# 交叉编译侧暂不加 -Werror——arm-none-eabi-gcc 由 CI 镜像提供、版本随镜像浮动，
+# 宿主机单测那边则可以按需对齐版本。
+target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -Wextra)
+
 # Add include paths
 # 工程根入 include 路径，于是源码里可以写 "interface/uart_if.h" 这种
 # 从根算起的路径，一眼看出依赖方向。

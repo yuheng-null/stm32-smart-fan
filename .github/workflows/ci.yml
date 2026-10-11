@@ -49,9 +49,13 @@ jobs:
       - name: 安装 ARM 交叉工具链
         # libnewlib-arm-none-eabi 不能省：链接参数里带 --specs=nano.specs，
         # 少了它在链接期会报找不到 nano.specs。
+        #
+        # ninja 也要显式装：CMakePresets.json 的 default preset 生成器就是 Ninja。
+        # ubuntu 镜像恰好自带它，所以之前能过——但那是**隐性依赖**，与上面那个
+        # job 显式安装的做法不一致，镜像一换就会在 configure 阶段失败。
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi ninja-build
 
       - name: 配置
         run: cmake --preset Debug

@@ -145,7 +145,7 @@ static error_t app_send_banner(void)
         "      + 继电器报警灯(PB0, 高电平触发) + 有源蜂鸣器(PB1, 低电平触发)\r\n"
         "⚠️ 风扇 12V 必须在板子跑起来之后再给：PWM 悬空 = 内部上拉 = 全速。\r\n"
         "⚠️ 风扇 0% 时仍维持约 295 rpm（4 线规范 <20% 行为未定义），不是真停。\r\n"
-        "⚠️ NTC 参数尚未标定，温度只看趋势；曲线的横轴也因此是假设值。\r\n"
+        "⚠️ NTC 按标称参数换算（10k / B3950）；要绝对刻度就做两点校准。\r\n"
         "输入 ? 看串口命令表。K1/K2 短按调参，K1 长按切模式，K2 长按静音。\r\n"
         "\r\n";
 
@@ -260,15 +260,25 @@ void app_main_run(void)
     bool banner_done = false;
 
     for (;;) {
-        /* ---- 开机横幅：发不出去就下一轮再试 ---- */
+        /*
+         * ---- 开机横幅 ----
+         *
+         * 只发一次，**发不出去也不挡后面的任务**。
+         *
+         * 横幅是「锦上添花」，**发不出去也不挡后面的任务**。
+         *
+         * 串口 TX 侧一出问题（TX 被拉死、发送超时），若把主循环停在横幅这一步，
+         * 温控、按键、报警灯、蜂鸣器就**一个都不工作**，风扇停在 0%。
+         * 对一个主题就是「失效保护」的系统来说，这是最不该有的耦合：
+         * **诊断链路坏掉不该让冷却控制停摆**。
+         *
+         * 任务表照常从下一次循环开始跑（next_ms 初值为 0，第一拍立即到期）。
+         * 基准时刻取当下，避免任务在上电瞬间挤成一堆。
+         */
         if (!banner_done) {
-            if (app_send_banner() != ERR_OK) {
-                continue;
-            }
-
+            (void)app_send_banner();
             app_report_oled();
 
-            /* 基准时刻取开机之后，避免任务在上电瞬间挤成一堆 */
             const uint32_t now = bsp_system_get_tick_ms();
 
             for (size_t i = 0U; i < APP_TASK_COUNT; i++) {
@@ -276,7 +286,6 @@ void app_main_run(void)
             }
 
             banner_done = true;
-            continue;
         }
 
         const uint32_t now = bsp_system_get_tick_ms();

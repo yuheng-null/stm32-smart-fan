@@ -1,0 +1,18 @@
+# tools/ 下几个脚本的第三方依赖。
+#
+# 安装：
+#     python -m pip install -r tools/requirements.txt
+#
+# 说明（哪些脚本需要哪个）：
+#   capture_serial.py   需要 pyserial        —— 打开 COM 口抓串口
+#   fan_demo.py         需要 pyserial        —— 要连板子跑阶跃与闭环
+#                       （画图那一步才用 matplotlib）
+#   plot_telemetry.py   需要 matplotlib      —— 画四联图（--no-plot 时不画，
+#                                               但仍会 import，所以还是要装）
+#   cubemx_apply.py     无第三方依赖         —— 只用标准库，并且要求本机装了
+#                                               STM32CubeMX（见 README「改配置」）
+#
+# 版本下限取得很松：这些都是纯 Python 的稳定接口，没有需要锁版本的用法。
+
+pyserial>=3.4
+matplotlib>=3.5

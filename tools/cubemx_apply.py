@@ -557,7 +557,7 @@ def cmd_regenerate(args: argparse.Namespace) -> int:
     if lost or changed:
         print(
             "\n   别急着把代码重写一遍——那只治症状。诊断顺序：\n"
-            "   ① 有没有人绕过 CubeMX 手改过 .ioc？（头号嫌疑，但**因果未经证实**）\n"
+            "   ① 有没有人绕过 CubeMX 手改过 .ioc？（头号嫌疑）\n"
             "   ② 有没有改过 Core/ 里 USER CODE 块之外的内容？\n"
             "   ③ 以上都不是，再怀疑工具本身，并记下可复现步骤。\n"
             "   详见 docs/walkthrough.md 阶段 5。"

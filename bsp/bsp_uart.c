@@ -214,7 +214,23 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
        这几个标志必须按这个顺序才清得掉。 */
     __HAL_UART_CLEAR_PEFLAG(huart);
 
-    if (HAL_UART_Receive_IT(huart, &s_rx_byte, 1U) != HAL_OK) {
-        s_rx_error_count++;
+    /*
+     * 只在 HAL 确实把接收中止了的时候重新武装（RxState 回了 READY）。
+     *
+     * 理由在 HAL_UART_IRQHandler 的处理顺序里（本机 HAL 源码）：
+     *   · **非阻塞错误**（FE/NE/PE，不含 ORE）：先因 RXNE 调 UART_Receive_IT()，
+     *     于是 HAL_UART_RxCpltCallback() 已经跑过、并重新武装好了
+     *     （RxState 仍是 BUSY）；随后才调本回调。此时再武装一次只会拿到
+     *     HAL_BUSY——若把它当失败计数，**一次帧错误会让 rx_err 涨 2**。
+     *     而这个计数正是文档里推荐用来看「接线松没松、有没有共地」的指标，
+     *     翻倍会让它失去参考价值。
+     *   · **阻塞错误**（ORE）：HAL 先 UART_EndRxTransfer()（RxState 回 READY），
+     *     且**不会**走到 RxCplt，所以这一支必须由这里重新武装——否则之后
+     *     「永久只能发不能收」。
+     */
+    if (huart->RxState == HAL_UART_STATE_READY) {
+        if (HAL_UART_Receive_IT(huart, &s_rx_byte, 1U) != HAL_OK) {
+            s_rx_error_count++;
+        }
     }
 }

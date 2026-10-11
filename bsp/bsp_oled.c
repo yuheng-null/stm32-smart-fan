@@ -16,6 +16,25 @@
    命令字集中在 ssd1306_reg.h 里，所以单独引一次。 */
 #include "driver/device/ssd1306/ssd1306_reg.h"
 
+/* 字库：绘制接口要用。字体数据本身是可移植的（不含任何 STM32 符号），
+   但「本板用哪几个字号」是板级决定，所以只在这里引。 */
+#include "driver/device/ssd1306/ssd1306_fonts.h"
+
+/* 屏宽必须与驱动配置同源：若改了 ssd1306_conf.h 的 SSD1306_WIDTH 而忘了改
+   bsp_oled.h 的 BSP_OLED_WIDTH_PX，下面这行会编译不过（数组长度为负）。
+   之所以要这道断言，是因为布局代码按 BSP_OLED_WIDTH_PX 算右对齐，
+   两个值不一致时不会报错，只会把文字画到屏幕外。 */
+typedef char bsp_oled_width_must_match_ssd1306_conf[
+    (BSP_OLED_WIDTH_PX == SSD1306_WIDTH) ? 1 : -1];
+
+/**
+ * 本板唯一的屏幕实例。显存 1 KB，必须静态存储期。
+ *
+ * 收在本模块里、不导出类型，是为了让 app/ 那层完全不认识 ssd1306_t
+ * （理由见 bsp_oled.h 顶部）。
+ */
+static ssd1306_t s_oled;
+
 /**
  * 候选从机地址，按优先级排列。
  *
@@ -92,12 +111,8 @@ uint8_t bsp_oled_bus_scan(uint8_t *found, uint8_t max)
     return count;
 }
 
-error_t bsp_oled_init(ssd1306_t *dev)
+error_t bsp_oled_init(void)
 {
-    if (dev == NULL) {
-        return ERR_INVALID_PARAM;
-    }
-
     i2c_if_t *bus = bsp_i2c_get();
     if (bus == NULL) {
         return ERR_NOT_INITIALIZED;
@@ -116,14 +131,58 @@ error_t bsp_oled_init(ssd1306_t *dev)
         return ERR_COMMUNICATION;
     }
 
-    dev->bus      = bus;
-    dev->addr     = s_addr;
-    dev->delay_ms = bsp_oled_delay_ms;
+    s_oled.bus      = bus;
+    s_oled.addr     = s_addr;
+    s_oled.delay_ms = bsp_oled_delay_ms;
 
-    return ssd1306_init(dev);
+    return ssd1306_init(&s_oled);
 }
 
 uint8_t bsp_oled_get_addr(void)
 {
     return s_addr;
+}
+
+/* ------------------------------------------------------------- 绘制 */
+
+void bsp_oled_clear(void)
+{
+    (void)ssd1306_fill(&s_oled, SSD1306_BLACK);
+}
+
+void bsp_oled_draw_text(uint16_t x, uint16_t y, const char *text, bsp_oled_font_t font)
+{
+    if (text == NULL) {
+        return;
+    }
+
+    const SSD1306_Font_t *glyphs = (font == BSP_OLED_FONT_LARGE) ? &Font_11x18
+                                                                 : &Font_6x8;
+
+    (void)ssd1306_set_cursor(&s_oled, x, y);
+    (void)ssd1306_write_string(&s_oled, text, glyphs, SSD1306_WHITE);
+}
+
+uint16_t bsp_oled_text_width(const char *text, bsp_oled_font_t font)
+{
+    if (text == NULL) {
+        return 0U;
+    }
+
+    /* 这两个步进是字库的固有属性：6×8 与 11×18 的字符格宽。
+       写成常量而不是从字体结构体里推，是因为 ssd1306_write_string 本身就是
+       按「格宽」推进游标的，两边必须一致。 */
+    const uint16_t step = (font == BSP_OLED_FONT_LARGE) ? 11U : 6U;
+    uint16_t       n    = 0U;
+
+    while (text[n] != '\0') {
+        n++;
+    }
+
+    return (uint16_t)(n * step);
+}
+
+void bsp_oled_flush(void)
+{
+    (void)ssd1306_update_screen(&s_oled);
 }
